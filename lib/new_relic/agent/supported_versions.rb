@@ -11,29 +11,22 @@ module NewRelic
       {
         :type        => :ruby,
         :name        => "MRI",
-        :supported   => ["1.8.7", "1.9.2", "1.9.3", "2.0.0", "~> 2.1.0", "~> 2.2.0" ],
-        :deprecated  => ["1.8.6"],
+        :supported   => ["2.0.0", "~>2.1.0", "~>2.2.0", "~>2.3.0", "~>2.4.0"],
+        :deprecated  => ["1.8.6", "1.8.7", "1.9.2", "1.9.3"],
         :url         => "https://www.ruby-lang.org",
         :feed        => "https://www.ruby-lang.org/en/feeds/news.rss",
-        :notes       => [
-          "1.8.7 includes support for Ruby Enterprise Edition (REE)",
-          "Last supported agent on 1.8.6 was 3.6.8.168"]
+        :notes       => ["Last supported agent for 1.8.7, 1.9.2, and 1.9.3 was 3.18.1.330.",
+                         "Last supported agent on 1.8.6 was 3.6.8.168."]
       },
       :jruby =>
       {
         :type        => :ruby,
         :name        => "JRuby",
-        :supported   => ["~> 1.6.0", "~> 1.7.0"],
+        :supported   => ["~>9.0", "~>9.1"],
+        :deprecated  => ["~>1.7.0"],
         :url         => "http://jruby.org",
-        :feed        => "http://jruby.org/atom.xml"
-      },
-      :rbx =>
-      {
-        :type        => :ruby,
-        :name        => "Rubinius",
-        :supported   => ["~> 2.2.1"],
-        :url         => "http://rubini.us",
-        :feed        => "http://rubini.us/feed/atom.xml"
+        :feed        => "http://jruby.org/atom.xml",
+        :notes       => ["Last supported agent for ~>1.7.0 was 3.18.1.330."]
       },
 
       # App servers
@@ -85,16 +78,17 @@ module NewRelic
       :rails =>
       {
         :type        => :web,
-        :supported   => ["~>2.1.0", "~>2.2.0", "~>2.3.0", "~3.0.0", "~>3.1.0", "~>3.2.0", "~>4.0.0", "~>4.1.0", "~>4.2.0"],
-        :deprecated  => ["~>2.0.0"],
+        :supported   => ["~3.0.0", "~>3.1.0", "~>3.2.0", "~>4.0.0", "~>4.1.0", "~>4.2.0", "~>5.0.0", "~>5.1.0"],
+        :deprecated  => ["~>2.0.0", "~>2.1.0", "~>2.2.0", "~>2.3.0"],
         :url         => "https://rubygems.org/gems/rails",
         :feed        => "https://rubygems.org/gems/rails/versions.atom",
-        :notes       => ["Last supported agent for 2.0.x was 3.6.8.168"]
+        :notes       => ["Last supported agent for ~>2.1.0, ~>2.2.0, and ~>2.3.0 was 3.18.1.330.",
+                         "Last supported agent for 2.0.x was 3.6.8.168."]
       },
       :sinatra =>
       {
         :type        => :web,
-        :supported   => ["~>1.2.0", "~>1.3.0", "~>1.4.0"],
+        :supported   => ["~>1.2.0", "~>1.3.0", "~>1.4.0", "~>2.0.0"],
         :url         => "https://rubygems.org/gems/sinatra",
         :feed        => "https://rubygems.org/gems/sinatra/versions.atom"
       },
@@ -125,11 +119,12 @@ module NewRelic
       :activerecord =>
       {
         :type        => :database,
-        :supported   => ["~>2.1.0", "~>2.2.0", "~>2.3.0", "~>3.0.0", "~>3.1.0", "~>3.2.0", "~>4.0.0", "~>4.1.0", "~>4.2.0"],
-        :deprecated  => ["~>2.0.0"],
+        :supported   => ["~>3.0.0", "~>3.1.0", "~>3.2.0", "~>4.0.0", "~>4.1.0", "~>4.2.0", "~>5.0.0", "~>5.1.0"],
+        :deprecated  => ["~>2.0.0", "~>2.1.0", "~>2.2.0", "~>2.3.0",],
         :url         => "https://rubygems.org/gems/activerecord",
         :feed        => "https://rubygems.org/gems/activerecord/versions.atom",
-        :notes       => ["Last supported agent for 2.0.x was 3.6.8.168"]
+        :notes       => ["Last supported agent for ~>2.1.0, ~>2.2.0, and ~>2.3.0 was 3.18.1.330.",
+                         "Last supported agent for 2.0.x was 3.6.8.168."]
       },
       :datamapper =>
       {
@@ -148,12 +143,26 @@ module NewRelic
       :mongo =>
       {
         :type        => :database,
-        :supported   => [">= 1.8.0", "< 2.0.0"],
+        :supported   => ["~>1.8", "~>2.1"],
         :url         => "https://rubygems.org/gems/mongo",
         :feed        => "https://rubygems.org/gems/mongo/versions.atom"
       },
+      :redis =>
+      {
+        :type        => :database,
+        :supported   => ["~>3.0"],
+        :url         => "https://rubygems.org/gems/redis",
+        :feed        => "https://rubygems.org/gems/redis/versions.atom"
+      },
 
       # Background Jobs
+      :rake =>
+      {
+        :type        => :background,
+        :supported   => ["~>10.0"],
+        :url         => "https://rubygems.org/gems/rake",
+        :feed        => "https://rubygems.org/gems/rake/versions.atom"
+      },
       :resque =>
       {
         :type        => :background,
@@ -166,7 +175,7 @@ module NewRelic
       :sidekiq =>
       {
         :type        => :background,
-        :supported   => ["~>2.8"],
+        :supported   => ["~>2.8", "~>3.4.2", "~>4.0"],
         :url         => "https://rubygems.org/gems/sidekiq",
         :feed        => "https://rubygems.org/gems/sidekiq/versions.atom"
       },
@@ -214,6 +223,13 @@ module NewRelic
         :notes       => [
           "Supported for all agent-supported versions of Ruby.",
           "For more information on supported HTTP clients see http://docs.newrelic.com/docs/ruby/ruby-http-clients."]
+      },
+      :httprb =>
+      {
+        :type        => :http,
+        :supported   => [ ">= 0.9.9"],
+        :url         => "https://rubygems.org/gems/http",
+        :feed        => "https://rubygems.org/gems/http/versions.atom"
       },
 
       # Other

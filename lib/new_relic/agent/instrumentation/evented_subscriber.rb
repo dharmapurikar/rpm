@@ -58,13 +58,17 @@ module NewRelic
         def event_stack
           Thread.current[@queue_key] ||= Hash.new {|h,id| h[id] = [] }
         end
+
+        def state
+          NewRelic::Agent::TransactionState.tl_get
+        end
       end
 
       # Taken from ActiveSupport::Notifications::Event, pasted here
       # with a couple minor additions so we don't have a hard
       # dependency on ActiveSupport::Notifications.
       #
-      # Represents an intrumentation event, provides timing and metric
+      # Represents an instrumentation event, provides timing and metric
       # name information useful when recording metrics.
       class Event
         attr_reader :name, :time, :transaction_id, :payload, :children

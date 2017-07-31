@@ -232,7 +232,7 @@ class NewRelic::Agent::Transaction::TraceNodeTest < Minitest::Test
     s = NewRelic::Agent::Transaction::TraceNode.new(Time.now, 'Custom/test/metric')
 
     # should have a default value
-    assert_equal(nil, s.instance_eval { @params })
+    assert_equal({}, s.instance_variable_get(:@params))
     assert_equal({}, s.params)
 
     # should otherwise take the value from the @params var
@@ -280,25 +280,6 @@ class NewRelic::Agent::Transaction::TraceNodeTest < Minitest::Test
     end
   end
 
-  def test_find_node_default
-    s = NewRelic::Agent::Transaction::TraceNode.new(Time.now, 'Custom/test/metric')
-    id_to_find = s.object_id
-    # should return itself in the base case
-    assert_equal(s, s.find_node(id_to_find))
-  end
-
-  def test_find_node_not_found
-    s = NewRelic::Agent::Transaction::TraceNode.new(Time.now, 'Custom/test/metric')
-    assert_equal(nil, s.find_node(-1))
-  end
-
-  def test_find_node_with_children
-    s = NewRelic::Agent::Transaction::TraceNode.new(Time.now, 'Custom/test/metric')
-    id_to_find = s.object_id
-    # should return itself in the base case
-    assert_equal(s, s.find_node(id_to_find))
-  end
-
   def test_explain_sql_raising_an_error
     s = NewRelic::Agent::Transaction::TraceNode.new(Time.now, 'Custom/test/metric')
     config = { :adapter => 'mysql' }
@@ -329,18 +310,18 @@ class NewRelic::Agent::Transaction::TraceNodeTest < Minitest::Test
 
   def test_params_equal
     s = NewRelic::Agent::Transaction::TraceNode.new(Time.now, 'Custom/test/metric')
-    assert_equal(nil, s.instance_eval { @params })
+    assert_equal({}, s.instance_variable_get(:@params))
 
     params = {:foo => 'correct'}
 
     s.params = params
-    assert_equal(params, s.instance_eval { @params })
+    assert_equal(params, s.instance_variable_get(:@params))
   end
 
   def test_obfuscated_sql
     sql = 'select * from table where id = 1'
     s = NewRelic::Agent::Transaction::TraceNode.new(Time.now, 'Custom/test/metric')
-    s[:sql] = sql
+    s[:sql] = NewRelic::Agent::Database::Statement.new(sql)
     assert_equal('select * from table where id = ?', s.obfuscated_sql)
   end
 
@@ -353,7 +334,7 @@ class NewRelic::Agent::Transaction::TraceNodeTest < Minitest::Test
 
   def test_parent_node_equals
     s = NewRelic::Agent::Transaction::TraceNode.new(Time.now, 'Custom/test/metric')
-    assert_equal(nil, s.instance_eval { @parent_node })
+    assert_equal(nil, s.parent_node)
     fake_node = mock('node')
     s.send(:parent_node=, fake_node)
     assert_equal(fake_node, s.parent_node)

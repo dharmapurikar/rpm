@@ -36,8 +36,7 @@ class PipeServiceTest < Minitest::Test
     service.metric_data({})
   end
 
-  if NewRelic::LanguageSupport.can_fork? &&
-      !NewRelic::LanguageSupport.using_version?('1.9.1')
+  if NewRelic::LanguageSupport.can_fork?
 
     def test_metric_data
       received_data = data_from_forked_process do
@@ -61,6 +60,13 @@ class PipeServiceTest < Minitest::Test
         @service.error_data(['err'])
       end
       assert_equal ['err'], received_data[:error_data]
+    end
+
+    def test_error_event_data
+      received_data = data_from_forked_process do
+        @service.error_event_data(['err_ev'])
+      end
+      assert_equal ['err_ev'], received_data[:error_event_data]
     end
 
     def test_sql_trace_data
@@ -121,7 +127,7 @@ class PipeServiceTest < Minitest::Test
 
   def generate_metric_data(metric_name, data=1.0)
     engine = NewRelic::Agent::StatsEngine.new
-    engine.get_stats_no_scope(metric_name).record_data_point(data)
+    engine.tl_record_unscoped_metrics(metric_name, data)
     engine.harvest!
   end
 

@@ -6,20 +6,6 @@ require File.expand_path(File.join(File.dirname(__FILE__),'..','..','test_helper
 require 'new_relic/agent/agent_logger'
 require 'new_relic/agent/null_logger'
 
-class ArrayLogDevice
-  def initialize( array=[] )
-    @array = array
-  end
-  attr_reader :array
-
-  def write( message )
-    @array << message
-  end
-
-  def close; end
-end
-
-
 class AgentLoggerTest < Minitest::Test
 
   LEVELS = [:fatal, :error, :warn, :info, :debug]
@@ -33,6 +19,7 @@ class AgentLoggerTest < Minitest::Test
 
   def teardown
     NewRelic::Agent.config.reset_to_defaults
+    NewRelic::Agent::Hostname.instance_variable_set(:@hostname, nil)
   end
 
 
@@ -209,6 +196,15 @@ class AgentLoggerTest < Minitest::Test
     end
   end
 
+  def test_default_format_contains_full_year
+    with_config(:log_level => :debug) do
+      logger = create_basic_logger
+
+      logger.info("The nice thing about standards is that you have so many to choose from. -- ast")
+      assert_logged(/#{Date.today.strftime("%Y-%m-%d")}/)
+    end
+  end
+
   def test_format_message_allows_nil_backtrace
     with_config(:log_level => :debug) do
       logger = create_basic_logger
@@ -252,8 +248,8 @@ class AgentLoggerTest < Minitest::Test
 
   def test_log_exception_gets_backtrace_for_system_stack_error
     # This facility compensates for poor SystemStackError traces on MRI.
-    # JRuby and Rubinius raise errors with good backtraces, so skip this test.
-    return if jruby? || rubinius?
+    # JRuby raises errors with good backtraces, so skip this test.
+    return if NewRelic::LanguageSupport.jruby?
 
     logger = create_basic_logger
 
@@ -296,6 +292,7 @@ class AgentLoggerTest < Minitest::Test
   end
 
   def test_should_cache_hostname
+    NewRelic::Agent::Hostname.instance_variable_set(:@hostname, nil)
     Socket.expects(:gethostname).once.returns('cachey-mccaherson')
     logger = create_basic_logger
     logger.warn("one")

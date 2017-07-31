@@ -3,7 +3,6 @@
 # See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
 
 require 'new_relic/agent/transaction_sample_builder'
-require 'new_relic/agent/transaction/developer_mode_sample_buffer'
 require 'new_relic/agent/transaction/slowest_sample_buffer'
 require 'new_relic/agent/transaction/synthetics_sample_buffer'
 require 'new_relic/agent/transaction/xray_sample_buffer'
@@ -20,14 +19,12 @@ module NewRelic
     #
     # @api public
     class TransactionSampler
-      attr_reader :last_sample, :dev_mode_sample_buffer, :xray_sample_buffer
+      attr_reader :last_sample, :xray_sample_buffer
 
       def initialize
-        @dev_mode_sample_buffer = NewRelic::Agent::Transaction::DeveloperModeSampleBuffer.new
         @xray_sample_buffer = NewRelic::Agent::Transaction::XraySampleBuffer.new
 
         @sample_buffers = []
-        @sample_buffers << @dev_mode_sample_buffer
         @sample_buffers << @xray_sample_buffer
         @sample_buffers << NewRelic::Agent::Transaction::SlowestSampleBuffer.new
         @sample_buffers << NewRelic::Agent::Transaction::SyntheticsSampleBuffer.new
@@ -54,7 +51,7 @@ module NewRelic
       end
 
       def enabled?
-        Agent.config[:'transaction_tracer.enabled'] || Agent.config[:developer_mode]
+        Agent.config[:'transaction_tracer.enabled']
       end
 
       def on_start_transaction(state, start_time)
@@ -65,18 +62,11 @@ module NewRelic
 
       # This delegates to the builder to create a new open transaction node
       # for the frame, beginning at the optionally specified time.
-      #
-      # Note that in developer mode, this captures a stacktrace for
-      # the beginning of each node, which can be fairly slow
       def notice_push_frame(state, time=Time.now)
         builder = state.transaction_sample_builder
         return unless builder
 
-        node = builder.trace_entry(time.to_f)
-        if @dev_mode_sample_buffer
-          @dev_mode_sample_buffer.visit_node(node)
-        end
-        node
+        builder.trace_entry(time.to_f)
       end
 
       # Informs the transaction sample builder about the end of a traced frame
@@ -120,115 +110,6 @@ module NewRelic
         @sample_buffers.each do |sample_buffer|
           sample_buffer.store(sample)
         end
-      end
-
-      MAX_DATA_LENGTH = 16384
-      # This method is used to record metadata into the currently
-      # active node like a sql query, memcache key, or Net::HTTP uri
-      #
-      # duration is seconds, float value.
-      def notice_extra_data(builder, message, duration, key)
-        return unless builder
-        node = builder.current_node
-        if node
-          if key == :sql
-            sql = node[:sql]
-            if(sql && !sql.empty?)
-              sql = self.class.truncate_message(sql << "\n#{message}") if sql.length <= MAX_DATA_LENGTH
-            else
-              # message is expected to have been pre-truncated by notice_sql
-              node[:sql] = message
-            end
-          else
-            node[key] = self.class.truncate_message(message)
-          end
-          append_backtrace(node, duration)
-        end
-      end
-
-      private :notice_extra_data
-
-      # Truncates the message to `MAX_DATA_LENGTH` if needed, and
-      # appends an ellipsis because it makes the trucation clearer in
-      # the UI
-      def self.truncate_message(message)
-        if message.length > (MAX_DATA_LENGTH - 4)
-          message.slice!(MAX_DATA_LENGTH - 4..message.length)
-          message << "..."
-        else
-          message
-        end
-      end
-
-      # Appends a backtrace to a node if that node took longer
-      # than the specified duration
-      def append_backtrace(node, duration)
-        if duration >= Agent.config[:'transaction_tracer.stack_trace_threshold']
-          node[:backtrace] = caller.join("\n")
-        end
-      end
-
-      # Attaches an SQL query on the current transaction trace node.
-      #
-      # This method should be used only by gem authors wishing to extend
-      # the Ruby agent to instrument new database interfaces - it should
-      # generally not be called directly from application code.
-      #
-      # @param sql [String] the SQL query being recorded
-      # @param config [Object] the driver configuration for the connection
-      # @param duration [Float] number of seconds the query took to execute
-      # @param explainer [Proc] for internal use only - 3rd-party clients must
-      #                         not pass this parameter.
-      #
-      # @api public
-      # @deprecated Use {Datastores.notice_sql} instead.
-      #
-      def notice_sql(sql, config, duration, state=nil, explainer=nil) #THREAD_LOCAL_ACCESS sometimes
-        # some statements (particularly INSERTS with large BLOBS
-        # may be very large; we should trim them to a maximum usable length
-        state ||= TransactionState.tl_get
-        builder = state.transaction_sample_builder
-        if state.is_sql_recorded?
-          statement = build_database_statement(sql, config, explainer)
-          notice_extra_data(builder, statement, duration, :sql)
-        end
-      end
-
-      def build_database_statement(sql, config, explainer)
-        statement = Database::Statement.new(Database.capture_query(sql))
-        if config
-          statement.adapter = config[:adapter]
-          statement.config = config
-        end
-        statement.explainer = explainer
-
-        statement
-      end
-
-      # Attaches an additional non-SQL query parameter to the current
-      # transaction trace node.
-      #
-      # This may be used for recording a query against a key-value store like
-      # memcached or redis.
-      #
-      # This method should be used only by gem authors wishing to extend
-      # the Ruby agent to instrument uninstrumented key-value stores - it should
-      # generally not be called directly from application code.
-      #
-      # @param key [String] the name of the key that was queried
-      # @param duration [Float] number of seconds the query took to execute
-      #
-      # @api public
-      # @deprecated Use {Datastores.notice_statement} instead.
-      #
-      def notice_nosql(key, duration) #THREAD_LOCAL_ACCESS
-        builder = tl_builder
-        notice_extra_data(builder, key, duration, :key)
-      end
-
-      def notice_nosql_statement(statement, duration) #THREAD_LOCAL_ACCESS
-        builder = tl_builder
-        notice_extra_data(builder, statement, duration, :statement)
       end
 
       # Set parameters on the current node.

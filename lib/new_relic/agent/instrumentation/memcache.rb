@@ -7,9 +7,10 @@
 # See:
 #     http://www.deveiate.org/code/Ruby-MemCache/ (Gem: Ruby-MemCache)
 #     http://seattlerb.rubyforge.org/memcache-client/ (Gem: memcache-client)
-#     http://github.com/mperham/dalli (Gem: dalli)
+#     https://github.com/mperham/dalli (Gem: dalli)
 
 require 'new_relic/agent/datastores/metric_helper'
+require 'new_relic/agent/instrumentation/memcache/dalli'
 
 module NewRelic
   module Agent
@@ -40,17 +41,14 @@ module NewRelic
               alias_method method_name_without, method_name
 
               define_method method_name do |*args, &block|
-                metrics = Datastores::MetricHelper.metrics_for("Memcached", method_name)
-
-                NewRelic::Agent::MethodTracer.trace_execution_scoped(metrics) do
-                  t0 = Time.now
-                  begin
-                    send method_name_without, *args, &block
-                  ensure
-                    if NewRelic::Agent.config[:capture_memcache_keys]
-                      NewRelic::Agent.instance.transaction_sampler.notice_nosql(args.first.inspect, (Time.now - t0).to_f) rescue nil
-                    end
+                segment = NewRelic::Agent::Transaction.start_datastore_segment "Memcached", method_name
+                begin
+                  send method_name_without, *args, &block
+                ensure
+                  if NewRelic::Agent.config[:capture_memcache_keys]
+                    segment.notice_nosql_statement "#{method_name} #{args.first.inspect}"
                   end
+                  segment.finish
                 end
               end
 
@@ -96,48 +94,5 @@ DependencyDetection.defer do
   executes do
     ::NewRelic::Agent.logger.info 'Installing Memcached instrumentation for memcached gem'
     ::NewRelic::Agent::Instrumentation::Memcache.instrument_methods(::Memcached)
-  end
-end
-
-DependencyDetection.defer do
-  named :dalli
-
-  depends_on do
-    NewRelic::Agent::Instrumentation::Memcache.enabled?
-  end
-
-  depends_on do
-    defined?(::Dalli::Client)
-  end
-
-  executes do
-    ::NewRelic::Agent.logger.info 'Installing Memcache instrumentation for dalli gem'
-    ::NewRelic::Agent::Instrumentation::Memcache.instrument_methods(::Dalli::Client)
-  end
-end
-
-DependencyDetection.defer do
-  named :dalli_cas_client
-
-  depends_on do
-    NewRelic::Agent::Instrumentation::Memcache.enabled?
-  end
-
-  depends_on do
-    # These CAS client methods are only optionally defined if users require
-    # dalli/cas/client. Use a separate dependency block so it can potentially
-    # re-evaluate after they've done that require.
-    defined?(::Dalli::Client) &&
-      ::NewRelic::Agent::Instrumentation::Memcache.supported_methods_for(::Dalli::Client,
-                                                                         CAS_CLIENT_METHODS).any?
-  end
-
-  CAS_CLIENT_METHODS = [:get_cas, :get_multi_cas, :set_cas, :replace_cas,
-                        :delete_cas]
-
-  executes do
-    ::NewRelic::Agent.logger.info 'Installing Dalli CAS Client Memcache instrumentation'
-    ::NewRelic::Agent::Instrumentation::Memcache.instrument_methods(::Dalli::Client,
-                                                                    CAS_CLIENT_METHODS)
   end
 end

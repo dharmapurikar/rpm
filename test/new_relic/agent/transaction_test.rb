@@ -9,7 +9,7 @@ class NewRelic::Agent::TransactionTest < Minitest::Test
   def setup
     @stats_engine = NewRelic::Agent.instance.stats_engine
     @stats_engine.reset!
-    NewRelic::Agent.instance.error_collector.reset!
+    NewRelic::Agent.instance.error_collector.drop_buffered_data
   end
 
   def teardown
@@ -20,7 +20,7 @@ class NewRelic::Agent::TransactionTest < Minitest::Test
   end
 
   def cleanup_transaction
-    NewRelic::Agent::TransactionState.tl_clear_for_testing
+    NewRelic::Agent::TransactionState.tl_clear
   end
 
   def test_request_parsing_none
@@ -680,13 +680,6 @@ class NewRelic::Agent::TransactionTest < Minitest::Test
     end
   end
 
-  def test_user_attributes_alias_to_custom_parameters
-    in_transaction('user_attributes') do |txn|
-      txn.set_user_attributes(:set_instance => :set_instance)
-      assert_has_custom_attribute(txn, "set_instance")
-    end
-  end
-
   def test_notice_error_in_current_transaction_saves_it_for_finishing
     in_transaction('failing') do |txn|
       NewRelic::Agent::Transaction.notice_error("")
@@ -698,8 +691,8 @@ class NewRelic::Agent::TransactionTest < Minitest::Test
     txn = in_transaction('oops') do
       NewRelic::Agent::Transaction.notice_error("wat?")
     end
-
-    error = NewRelic::Agent.instance.error_collector.errors.first
+    errors = harvest_error_traces!
+    error = errors.first
     assert_equal txn.attributes, error.attributes
   end
 
@@ -708,13 +701,15 @@ class NewRelic::Agent::TransactionTest < Minitest::Test
       # no-op
     end
     NewRelic::Agent::Transaction.notice_error("")
-    assert_equal 1, NewRelic::Agent.instance.error_collector.errors.count
+    errors = harvest_error_traces!
+    assert_equal 1, errors.count
   end
 
   def test_notice_error_without_transaction_notifies_error_collector
     cleanup_transaction
     NewRelic::Agent::Transaction.notice_error("")
-    assert_equal 1, NewRelic::Agent.instance.error_collector.errors.count
+    errors = harvest_error_traces!
+    assert_equal 1, errors.count
   end
 
   def test_notice_error_sends_uri_and_referer_from_request
@@ -723,8 +718,10 @@ class NewRelic::Agent::TransactionTest < Minitest::Test
       NewRelic::Agent::Transaction.notice_error("wat")
     end
 
-    assert_equal 1, NewRelic::Agent.instance.error_collector.errors.count
-    error = NewRelic::Agent.instance.error_collector.errors.first
+    errors = harvest_error_traces!
+    assert_equal 1, errors.count
+
+    error = errors.first
     assert_equal "/here",  error.request_uri
   end
 
@@ -881,11 +878,10 @@ class NewRelic::Agent::TransactionTest < Minitest::Test
   end
 
   def with_java_classes_loaded
-    # class_variable_set is private on 1.8.7 :(
-    ::NewRelic::Agent::Transaction.send(:class_variable_set, :@@java_classes_loaded, true)
+    ::NewRelic::Agent::Transaction.class_variable_set :@@java_classes_loaded, true
     yield
   ensure
-    ::NewRelic::Agent::Transaction.send(:class_variable_set, :@@java_classes_loaded, false)
+    ::NewRelic::Agent::Transaction.class_variable_set :@@java_classes_loaded, false
   end
 
   def test_cpu_burn_normal
@@ -1057,6 +1053,17 @@ class NewRelic::Agent::TransactionTest < Minitest::Test
     assert_metrics_not_recorded(['Controller/boom'])
   end
 
+  def test_start_ignores_transactions_from_ignored_paths
+    with_config(:rules => { :ignore_url_regexes => ['ignored/path'] }) do
+      req = mock('request')
+      req.stubs(:path).returns('ignored/path')
+
+      in_transaction(request: req) do |txn|
+        assert txn.ignore?
+      end
+    end
+  end
+
   def test_stop_safe_from_exceptions
     NewRelic::Agent::Transaction.any_instance.stubs(:stop).raises("Haha")
     expects_logging(:error, any_parameters)
@@ -1082,15 +1089,6 @@ class NewRelic::Agent::TransactionTest < Minitest::Test
       in_transaction do |txn|
         txn.stubs(:request_path).returns(rule + '/path')
         assert txn.user_defined_rules_ignore?, "Paths should be ignored based on user defined rules. Rule: '#{rule}', Path: '#{txn.request_path}'."
-      end
-    end
-  end
-
-  def test_stop_ignores_transactions_from_ignored_paths
-    with_config(:rules => { :ignore_url_regexes => ['ignored/path'] }) do
-      in_transaction do |txn|
-        txn.stubs(:request_path).returns('ignored/path')
-        txn.expects(:ignore!)
       end
     end
   end
@@ -1289,10 +1287,10 @@ class NewRelic::Agent::TransactionTest < Minitest::Test
   end
 
   def test_assigns_synthetics_to_intrinsic_attributes
-    txn = in_transaction do |txn|
-      txn.raw_synthetics_header = ""
-      txn.synthetics_payload = [1, 1, 100, 200, 300]
-      txn
+    txn = in_transaction do |t|
+      t.raw_synthetics_header = ""
+      t.synthetics_payload = [1, 1, 100, 200, 300]
+      t
     end
 
     result = txn.attributes.intrinsic_attributes_for(NewRelic::Agent::AttributeFilter::DST_TRANSACTION_TRACER)
@@ -1303,7 +1301,7 @@ class NewRelic::Agent::TransactionTest < Minitest::Test
 
 
   def test_intrinsic_attributes_include_gc_time
-    txn = in_transaction do |txn|
+    txn = in_transaction do |t|
       NewRelic::Agent::StatsEngine::GCProfiler.stubs(:record_delta).returns(10.0)
     end
 
@@ -1316,9 +1314,9 @@ class NewRelic::Agent::TransactionTest < Minitest::Test
 
     NewRelic::Agent.instance.cross_app_monitor.stubs(:client_referring_transaction_trip_id).returns('PDX-NRT')
 
-    txn = in_transaction do |txn|
+    txn = in_transaction do |t|
       NewRelic::Agent::TransactionState.tl_get.is_cross_app_caller = true
-      guid = txn.guid
+      guid = t.guid
     end
 
     result = txn.attributes.intrinsic_attributes_for(NewRelic::Agent::AttributeFilter::DST_TRANSACTION_TRACER)
@@ -1339,10 +1337,10 @@ class NewRelic::Agent::TransactionTest < Minitest::Test
   def test_intrinsic_attributes_include_path_hash
     path_hash = nil
 
-    txn = in_transaction do |txn|
+    txn = in_transaction do |t|
       state = NewRelic::Agent::TransactionState.tl_get
       state.is_cross_app_caller = true
-      path_hash = txn.cat_path_hash(state)
+      path_hash = t.cat_path_hash(state)
     end
 
     result = txn.attributes.intrinsic_attributes_for(NewRelic::Agent::AttributeFilter::DST_TRANSACTION_TRACER)
@@ -1350,9 +1348,9 @@ class NewRelic::Agent::TransactionTest < Minitest::Test
   end
 
   def test_synthetics_attributes_not_included_if_not_valid_synthetics_request
-    txn = in_transaction do |txn|
-      txn.raw_synthetics_header = nil
-      txn.synthetics_payload = nil
+    txn = in_transaction do |t|
+      t.raw_synthetics_header = nil
+      t.synthetics_payload = nil
     end
 
     result = txn.attributes.intrinsic_attributes_for(NewRelic::Agent::AttributeFilter::DST_TRANSACTION_TRACER)
@@ -1362,8 +1360,8 @@ class NewRelic::Agent::TransactionTest < Minitest::Test
   end
 
   def test_intrinsic_attributes_include_cpu_time
-    txn = in_transaction do |txn|
-      txn.stubs(:cpu_burn).returns(22.0)
+    txn = in_transaction do |t|
+      t.stubs(:cpu_burn).returns(22.0)
     end
 
     result = txn.attributes.intrinsic_attributes_for(NewRelic::Agent::AttributeFilter::DST_TRANSACTION_TRACER)
@@ -1407,8 +1405,8 @@ class NewRelic::Agent::TransactionTest < Minitest::Test
   end
 
   def test_http_response_code_included_in_agent_attributes
-    txn = in_transaction do |txn|
-      txn.http_response_code = 418
+    txn = in_transaction do |t|
+      t.http_response_code = 418
     end
 
     actual = txn.attributes.agent_attributes_for(NewRelic::Agent::AttributeFilter::DST_TRANSACTION_TRACER)
@@ -1417,7 +1415,7 @@ class NewRelic::Agent::TransactionTest < Minitest::Test
 
   def test_referer_in_agent_attributes
     request = stub('request', :referer => "/referered", :path => "/")
-    txn = in_transaction(:request => request) do |txn|
+    txn = in_transaction(:request => request) do
     end
 
     actual = txn.attributes.agent_attributes_for(NewRelic::Agent::AttributeFilter::DST_ERROR_COLLECTOR)
@@ -1426,10 +1424,101 @@ class NewRelic::Agent::TransactionTest < Minitest::Test
 
   def test_referer_omitted_if_not_on_request
     request = stub('request', :path => "/")
-    txn = in_transaction(:request => request) do |txn|
+    txn = in_transaction(:request => request) do
     end
 
     actual = txn.attributes.agent_attributes_for(NewRelic::Agent::AttributeFilter::DST_TRANSACTION_TRACER)
     refute_includes actual, :'request.headers.referer'
+  end
+
+  def test_error_recorded_predicate_false_by_default
+    txn = in_transaction do
+    end
+
+    refute txn.payload[:error], "Did not expected error to be recorded"
+  end
+
+  def test_error_recorded_predicate_true_when_error_recorded
+    txn = in_transaction do |t|
+      t.notice_error StandardError.new "Sorry!"
+    end
+
+    assert txn.payload[:error], "Expected error to be recorded"
+  end
+
+  def test_error_recorded_predicate_abides_by_ignore_filter
+    filter = Proc.new do |error|
+      error.message == "Sorry!" ? nil : error
+    end
+
+    with_ignore_error_filter filter do
+      txn = in_transaction do |t|
+        t.notice_error StandardError.new "Sorry!"
+      end
+
+      refute txn.payload[:error], "Expected error to be apologetic"
+    end
+  end
+
+  def test_error_recorded_with_ignore_filter_and_multiple_errors
+    filter = Proc.new do |error|
+      error.message == "Sorry!" ? nil : error
+    end
+
+    with_ignore_error_filter filter do
+      txn = in_transaction do |t|
+        t.notice_error StandardError.new "Sorry!"
+        t.notice_error StandardError.new "Not Sorry!"
+        t.notice_error StandardError.new "Sorry!"
+      end
+
+      assert txn.payload[:error], "Expected error to be recorded"
+    end
+  end
+
+  def test_nesting_max_depth_increments
+    state = NewRelic::Agent::TransactionState.tl_get
+
+    txn = in_transaction do |t|
+      assert_equal 1, t.nesting_max_depth
+      NewRelic::Agent::Transaction.start state, :other, :transaction_name => "inner_1"
+      assert_equal 2, t.nesting_max_depth
+      NewRelic::Agent::Transaction.start state, :other, :transaction_name => "inner_2"
+      assert_equal 3, t.nesting_max_depth
+      NewRelic::Agent::Transaction.stop(state)
+      NewRelic::Agent::Transaction.stop(state)
+    end
+
+    assert_equal 3, txn.nesting_max_depth
+  end
+
+  def test_set_transaction_name_for_nested_transactions
+    state = NewRelic::Agent::TransactionState.tl_get
+
+    in_web_transaction "Controller/Framework/webby" do |t|
+      NewRelic::Agent::Transaction.start state, :controller, :transaction_name => "Controller/Framework/inner_1"
+      NewRelic::Agent::Transaction.start state, :controller, :transaction_name => "Controller/Framework/inner_2"
+      segment = NewRelic::Agent::Transaction.start_segment "Ruby/my_lib/my_meth"
+      NewRelic::Agent.set_transaction_name "RackFramework/action"
+      segment.finish
+      NewRelic::Agent::Transaction.stop(state)
+      NewRelic::Agent::Transaction.stop(state)
+    end
+
+    assert_metrics_recorded_exclusive [
+      "Controller/RackFramework/action",
+      "HttpDispatcher",
+      "Apdex",
+      "ApdexAll",
+      "Apdex/RackFramework/action",
+      "Nested/Controller/Framework/webby",
+      "Nested/Controller/Framework/inner_1",
+      "Nested/Controller/RackFramework/action",
+      "Ruby/my_lib/my_meth",
+      ["Nested/Controller/Framework/webby", "Controller/RackFramework/action"],
+      ["Nested/Controller/Framework/inner_1", "Controller/RackFramework/action"],
+      ["Nested/Controller/RackFramework/action", "Controller/RackFramework/action"],
+      ["Ruby/my_lib/my_meth", "Controller/RackFramework/action"]
+    ]
   end
 end

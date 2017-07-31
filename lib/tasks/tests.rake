@@ -1,10 +1,10 @@
 begin
   require 'rake/testtask'
-rescue LoadError => e
+rescue LoadError
 end
 
 if defined? Rake::TestTask
-  namespace :test do |t|
+  namespace :test do
     def look_for_seed(tasks)
       matches = tasks.map { |t| /(seed=.*?)[,\]]/.match(t) }.compact
       if matches.any?

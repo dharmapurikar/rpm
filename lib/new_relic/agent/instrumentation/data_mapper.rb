@@ -109,6 +109,9 @@ module NewRelic
       end
 
       DATA_MAPPER = "DataMapper".freeze
+      PASSWORD_REGEX = /&password=.*?(&|$)/
+      AMPERSAND = '&'.freeze
+      PASSWORD_PARAM = '&password='.freeze
 
       def self.method_body(clazz, method_name, operation_only)
         use_model_name   = NewRelic::Helper.instance_methods_include?(clazz, :model)
@@ -130,13 +133,38 @@ module NewRelic
               name = self.class.name
             end
 
-            metrics = NewRelic::Agent::Datastores::MetricHelper.metrics_for(
-              DATA_MAPPER,
-              metric_operation,
-              name)
+            segment = NewRelic::Agent::Transaction.start_datastore_segment DATA_MAPPER, metric_operation, name
 
-            NewRelic::Agent::MethodTracer.trace_execution_scoped(metrics) do
+            begin
               self.send("#{method_name}_without_newrelic", *args, &blk)
+            rescue ::DataObjects::ConnectionError => e
+              raise
+            rescue ::DataObjects::SQLError => e
+              e.uri.gsub!(PASSWORD_REGEX, AMPERSAND) if e.uri.include?(PASSWORD_PARAM)
+
+              strategy = NewRelic::Agent::Database.record_sql_method(:slow_sql)
+              case strategy
+              when :obfuscated
+                adapter_name = if self.respond_to?(:options)
+                    self.options[:adapter]
+                  else
+                    if self.repository.adapter.respond_to?(:options)
+                      self.repository.adapter.options[:adapter]
+                    else
+                      # DataMapper < 0.10.0
+                      self.repository.adapter.uri.scheme
+                    end
+                  end
+                statement = NewRelic::Agent::Database::Statement.new(e.query, :adapter => adapter_name)
+                obfuscated_sql = NewRelic::Agent::Database.obfuscate_sql(statement)
+                e.instance_variable_set(:@query, obfuscated_sql)
+              when :off
+                e.instance_variable_set(:@query, nil)
+              end
+
+              raise
+            ensure
+              segment.finish
             end
           end
         end
@@ -156,8 +184,11 @@ module NewRelic
           state = NewRelic::Agent::TransactionState.tl_get
           return unless state.is_execution_traced?
 
-          duration = msg.duration / 1000000.0
-          NewRelic::Agent.instance.transaction_sampler.notice_sql(msg.query, nil, duration, state)
+          txn = state.current_transaction
+
+          if txn && txn.current_segment.respond_to?(:notice_sql)
+            txn.current_segment.notice_sql msg.query
+          end
         ensure
           super
         end

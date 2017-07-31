@@ -5,6 +5,7 @@
 require 'new_relic/agent/instrumentation/controller_instrumentation'
 require 'new_relic/agent/instrumentation/sinatra/transaction_namer'
 require 'new_relic/agent/instrumentation/sinatra/ignorer'
+require 'new_relic/agent/parameter_filtering'
 
 DependencyDetection.defer do
   @name = :sinatra
@@ -48,7 +49,6 @@ DependencyDetection.defer do
       # we can't be sure that rack is available when this file is first required.
       require 'new_relic/rack/agent_hooks'
       require 'new_relic/rack/browser_monitoring'
-      require 'new_relic/rack/error_collector'
 
       ::Sinatra::Base.class_eval do
         class << self

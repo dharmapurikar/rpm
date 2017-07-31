@@ -298,7 +298,8 @@ module NewRelic::Agent::Configuration
 
         assert_warning if testcase["warning"]
         assert_equal(testcase["expected"].sort_by { |h| h["label_type"] },
-                     @manager.parse_labels_from_string.sort_by { |h| h["label_type"] })
+                     @manager.parse_labels_from_string.sort_by { |h| h["label_type"] },
+                     "failed on #{testcase["name"]}")
       end
     end
 
@@ -440,12 +441,6 @@ module NewRelic::Agent::Configuration
 
     def assert_parsed_labels(expected)
       result = @manager.parsed_labels
-
-      # 1.8.7 hash ordering means we can't directly compare. Lean on the
-      # structure and flattened array sorting to do the comparison we need.
-      result = result.map(&:to_a).sort
-      expected = expected.map(&:to_a).sort
-
       assert_equal expected, result
     end
 

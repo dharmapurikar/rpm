@@ -83,20 +83,29 @@ module Multiverse
 
     GROUPS = {
       "agent"         => ["agent_only", "bare", "config_file_loading",
-                          "deferred_instrumentation", "high_security"],
+                          "deferred_instrumentation", "high_security", "no_json"],
       "api"           => ["grape"],
-      "background"    => ["delayed_job", "resque", "sidekiq"],
-      "database"      => ["datamapper", "mongo", "sequel"],
-      "httpclients"   => ["curb", "excon", "httpclient", "typhoeus", "net_http"],
+      "background"    => ["delayed_job", "sidekiq"],
+      "database"      => ["datamapper", "mongo", "redis", "sequel"],
+      "httpclients"   => ["curb", "excon", "httpclient", "typhoeus", "net_http", "httprb"],
       "rails"         => ["active_record", "rails"],
       "serialization" => ["json", "marshalling", "yajl"],
       "sinatra"       => ["sinatra", "padrino"],
+      "background_2"  => ["resque"],
 
       "rest"          => []  # Specially handled below
     }
 
+    # Would like to reinstate but requires investigation, see RUBY-1749
+    unless RUBY_VERSION >= '2.1' and RUBY_VERSION < '2.3'
+      GROUPS['background_2'] << 'rake'
+    end
+
     def passes_filter?(dir, filter)
       return true if filter.nil?
+
+      # Would like to reinstate but requires investigation, see RUBY-1749
+      return false if dir == 'rake' and RUBY_VERSION >= '2.1' and RUBY_VERSION < '2.3'
 
       if filter.include?("group=")
         key = filter.sub("group=", "")

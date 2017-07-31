@@ -61,7 +61,8 @@ class NewRelic::Agent::Agent::StartTest < Minitest::Test
     self.expects(:generate_environment_report)
     self.expects(:start_worker_thread)
     self.expects(:install_exit_handler)
-    with_config(:dispatcher => 'test', :sync_startup => false, :monitor_mode => true, :license_key => 'a' * 40) do
+    with_config(:dispatcher => 'test', :sync_startup => false, :monitor_mode => true,
+      :license_key => 'a' * 40, :disable_samplers => false) do
       check_config_and_start_agent
     end
   end
@@ -73,7 +74,8 @@ class NewRelic::Agent::Agent::StartTest < Minitest::Test
     self.expects(:connect_in_foreground)
     self.expects(:start_worker_thread)
     self.expects(:install_exit_handler)
-    with_config(:dispatcher => 'test', :sync_startup => true, :monitor_mode => true, :license_key => 'a' * 40) do
+    with_config(:dispatcher => 'test', :sync_startup => true, :monitor_mode => true,
+      :license_key => 'a' * 40, :disable_samplers => false) do
       check_config_and_start_agent
     end
   end
@@ -89,8 +91,7 @@ class NewRelic::Agent::Agent::StartTest < Minitest::Test
   private :at_exit
 
   def test_install_exit_handler_positive
-    NewRelic::LanguageSupport.expects(:using_engine?).with('rbx').returns(false)
-    NewRelic::LanguageSupport.expects(:using_engine?).with('jruby').returns(false)
+    NewRelic::LanguageSupport.expects(:jruby?).returns(false)
     self.expects(:sinatra_classic_app?).returns(false)
     # we are overriding at_exit above, to immediately return, so we can
     # test the shutdown logic. It's somewhat unfortunate, but we can't
@@ -110,14 +111,10 @@ class NewRelic::Agent::Agent::StartTest < Minitest::Test
 
   def test_install_exit_handler_weird_ruby
     with_config(:send_data_one_exit => true) do
-      NewRelic::LanguageSupport.expects(:using_engine?).with('rbx').returns(false)
-      NewRelic::LanguageSupport.expects(:using_engine?).with('jruby').returns(false)
+      NewRelic::LanguageSupport.expects(:jruby?).returns(false)
       self.expects(:sinatra_classic_app?).returns(true)
       install_exit_handler
-      NewRelic::LanguageSupport.expects(:using_engine?).with('rbx').returns(false)
-      NewRelic::LanguageSupport.expects(:using_engine?).with('jruby').returns(true)
-      install_exit_handler
-      NewRelic::LanguageSupport.expects(:using_engine?).with('rbx').returns(true)
+      NewRelic::LanguageSupport.expects(:jruby?).returns(true)
       install_exit_handler
     end
   end

@@ -5,6 +5,8 @@
 require File.expand_path(File.join(File.dirname(__FILE__),'..','test_helper'))
 require 'new_relic/agent/transaction/attributes'
 
+class FooError < StandardError; end
+
 class NewRelic::Agent::NoticedErrorTest < Minitest::Test
   include NewRelic::TestHelpers::Exceptions
 
@@ -126,6 +128,14 @@ class NewRelic::Agent::NoticedErrorTest < Minitest::Test
     end
   end
 
+  def test_long_message
+    #yes, times 500. it's a 5000 byte string. Assuming strings are
+    #still 1 byte / char.
+    err = create_error(StandardError.new("1234567890" * 500))
+    assert_equal 4096, err.message.length
+    assert_equal ('1234567890' * 500)[0..4095], err.message
+  end
+
   def test_permits_messages_from_whitelisted_exceptions_in_high_security_mode
     with_config(:'strip_exception_messages.whitelist' => 'NewRelic::TestHelpers::Exceptions::TestError') do
       e = TestError.new('whitelisted test exception')
@@ -172,6 +182,15 @@ class NewRelic::Agent::NoticedErrorTest < Minitest::Test
     assert_equal(error.message.to_s, 'Buffy FOREVER')
   end
 
+  if defined?(Rails) && Rails::VERSION::MAJOR < 5
+    def test_uses_original_exception_class_name
+      orig = FooError.new
+      e = mock('exception', original_exception: orig)
+      error = NewRelic::NoticedError.new(@path, e, @time)
+      assert_equal(error.exception_class_name, 'FooError')
+    end
+  end
+
   def test_intrinsics_always_get_sent
     with_config(:'error_collector.attributes.enabled' => false) do
       attributes = NewRelic::Agent::Transaction::Attributes.new(NewRelic::Agent.instance.attribute_filter)
@@ -182,6 +201,57 @@ class NewRelic::Agent::NoticedErrorTest < Minitest::Test
 
       serialized_attributes = extract_attributes(error)
       assert_equal({ :intrinsic => "attribute" }, serialized_attributes["intrinsics"])
+    end
+  end
+
+  def test_custom_attributes_sent_when_enabled
+    with_config :'error_collector.attributes.enabled' => true do
+      attributes = NewRelic::Agent::Transaction::Attributes.new(NewRelic::Agent.instance.attribute_filter)
+      custom_attrs = {"name" => "Ron Burgundy", "channel" => 4}
+      attributes.merge_custom_attributes(custom_attrs)
+
+      error = NewRelic::NoticedError.new(@path, Exception.new("O_o"))
+      error.attributes = attributes
+
+      assert_equal custom_attrs, error.custom_attributes
+    end
+  end
+
+  def test_custom_attributes_not_sent_when_disabled
+    with_config :'error_collector.attributes.enabled' => false do
+      attributes = NewRelic::Agent::Transaction::Attributes.new(NewRelic::Agent.instance.attribute_filter)
+      custom_attrs = {"name" => "Ron Burgundy", "channel" => 4}
+      attributes.merge_custom_attributes(custom_attrs)
+
+      error = NewRelic::NoticedError.new(@path, Exception.new("O_o"))
+      error.attributes = attributes
+
+      assert_equal({}, error.custom_attributes)
+    end
+  end
+
+  def test_agent_attributes_sent_when_enabled
+    with_config :'error_collector.attributes.enabled' => true do
+      attributes = NewRelic::Agent::Transaction::Attributes.new(NewRelic::Agent.instance.attribute_filter)
+      attributes.add_agent_attribute :"request.headers.referer", "http://blog.site/home", NewRelic::Agent::AttributeFilter::DST_ALL
+
+      error = NewRelic::NoticedError.new(@path, Exception.new("O_o"))
+      error.attributes = attributes
+
+      expected = {:"request.headers.referer" => "http://blog.site/home"}
+      assert_equal expected, error.agent_attributes
+    end
+  end
+
+  def test_agent_attributes_not_sent_when_disabled
+    with_config :'error_collector.attributes.enabled' => false do
+      attributes = NewRelic::Agent::Transaction::Attributes.new(NewRelic::Agent.instance.attribute_filter)
+      attributes.add_agent_attribute :"request.headers.referer", "http://blog.site/home", NewRelic::Agent::AttributeFilter::DST_ALL
+
+      error = NewRelic::NoticedError.new(@path, Exception.new("O_o"))
+      error.attributes = attributes
+
+      assert_equal({}, error.agent_attributes)
     end
   end
 

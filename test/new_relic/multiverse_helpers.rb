@@ -72,7 +72,7 @@ module MultiverseHelpers
     NewRelic::Agent.instance.error_collector.instance_variable_set(:@ignore_filter, nil)
 
     # Clean up any thread-local variables starting with 'newrelic'
-    NewRelic::Agent::TransactionState.tl_clear_for_testing
+    NewRelic::Agent::TransactionState.tl_clear
 
     NewRelic::Agent.instance.transaction_sampler.reset!
 
@@ -156,6 +156,12 @@ module MultiverseHelpers
     $collector.calls_for("analytic_event_data").first.events.first
   end
 
+  def single_metrics_post
+    assert_equal 1, $collector.calls_for("metric_data").length
+
+    $collector.calls_for("metric_data").first
+  end
+
   def single_connect_posted
     assert_equal 1, $collector.calls_for(:connect).size
     $collector.calls_for(:connect).first
@@ -170,7 +176,7 @@ module MultiverseHelpers
     raw_attributes = @js_data["atts"]
 
     if raw_attributes
-      attributes = NewRelic::JSONWrapper.load @instrumentor.obfuscator.deobfuscate(raw_attributes)
+      attributes = ::JSON.load @instrumentor.obfuscator.deobfuscate(raw_attributes)
       @js_custom_attributes = attributes['u']
       @js_agent_attributes = attributes['a']
     end

@@ -40,20 +40,31 @@ module NewRelic
           @request = request
           @uri = case request.url
             when ::URI then request.url
-            else NewRelic::Agent::HTTPClients::URIUtil.parse_url(request.url)
+            else NewRelic::Agent::HTTPClients::URIUtil.parse_and_normalize_url(request.url)
             end
         end
 
+        TYPHOEUS = "Typhoeus".freeze
+
         def type
-          "Typhoeus"
+          TYPHOEUS
+        end
+
+        LHOST = 'host'.freeze
+        UHOST = 'Host'.freeze
+
+        def host_from_header
+          self[LHOST] || self[UHOST]
         end
 
         def host
-          self['host'] || self['Host'] || @uri.host
+          host_from_header || @uri.host
         end
 
+        GET = 'GET'.freeze
+
         def method
-          (@request.options[:method] || 'GET').to_s.upcase
+          (@request.options[:method] || GET).to_s.upcase
         end
 
         def [](key)

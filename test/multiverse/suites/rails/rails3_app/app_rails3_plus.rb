@@ -47,6 +47,13 @@ if !defined?(MyApp)
   end
 
   if defined?(Sinatra)
+    module Sinatra
+      class Application < Base
+        # Override to not accidentally start the app in at_exit handler
+        set :run, Proc.new { false }
+      end
+    end
+
     class SinatraTestApp < Sinatra::Base
       get '/' do
         raise "Intentional error" if params["raise"]
@@ -65,7 +72,7 @@ if !defined?(MyApp)
       config.middleware.use ErrorMiddleware
     end
     initializer "install_middleware_by_name" do
-      config.middleware.use "NamedMiddleware"
+      config.middleware.use NamedMiddleware
     end
     initializer "install_middleware_instance" do
       config.middleware.use InstanceMiddleware.new
@@ -88,5 +95,19 @@ if !defined?(MyApp)
     get '/:controller(/:action(/:id))'
   end
 
-  class ApplicationController < ActionController::Base; end
+  class ApplicationController < ActionController::Base
+    # The :text option to render was deprecated in Rails 4.1 in favor of :body.
+    # With the patch below we can write our tests using render :body but have
+    # that converted to render :text for Rails versions that do not support
+    # render :body.
+    if Rails::VERSION::STRING < "4.1.0"
+      def render *args
+        options = args.first
+        if Hash === options && options.key?(:body)
+          options[:text] = options.delete(:body)
+        end
+        super
+      end
+    end
+  end
 end

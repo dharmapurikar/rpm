@@ -12,13 +12,17 @@ module NewRelic
         attr_reader :exit_timestamp
         attr_reader :parent_node
 
-        attr_accessor :metric_name
+        attr_accessor :metric_name, :params
 
         UNKNOWN_NODE_NAME = '<unknown>'.freeze
 
         def initialize(timestamp, metric_name)
           @entry_timestamp = timestamp
           @metric_name     = metric_name || UNKNOWN_NODE_NAME
+          @exit_timestamp  = nil
+          @called_nodes    = nil
+          @params          = {}
+          @parent_node     = nil
         end
 
         # sets the final timestamp on a node to indicate the exit
@@ -41,7 +45,7 @@ module NewRelic
           [ NewRelic::Helper.time_to_millis(@entry_timestamp),
             NewRelic::Helper.time_to_millis(@exit_timestamp),
             NewRelic::Coerce.string(@metric_name),
-            (@params || {}) ] +
+            params ] +
             [ (@called_nodes ? @called_nodes.map{|s| s.to_array} : []) ]
         end
 
@@ -115,14 +119,6 @@ module NewRelic
           params[key]
         end
 
-        def params
-          @params ||= {}
-        end
-
-        def params=(p)
-          @params = p
-        end
-
         # call the provided block for this node and each
         # of the called nodes
         def each_node(&block)
@@ -150,30 +146,17 @@ module NewRelic
           summary.current_nest_count -= 1 if summary
         end
 
-        # This is only for use by developer mode
-        def find_node(id)
-          return self if object_id == id
-          called_nodes.each do |node|
-            found = node.find_node(id)
-            return found if found
-          end
-          nil
-        end
-
         def explain_sql
           return params[:explain_plan] if params.key?(:explain_plan)
 
           statement = params[:sql]
-          return nil unless statement.respond_to?(:config) &&
-            statement.respond_to?(:explainer)
+          return nil unless statement.is_a?(Database::Statement)
 
-          NewRelic::Agent::Database.explain_sql(statement,
-                                                statement.config,
-                                                statement.explainer)
+          NewRelic::Agent::Database.explain_sql(statement)
         end
 
         def obfuscated_sql
-          NewRelic::Agent::Database.obfuscate_sql(params[:sql])
+          NewRelic::Agent::Database.obfuscate_sql(params[:sql].sql)
         end
 
         def called_nodes=(nodes)

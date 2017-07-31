@@ -21,7 +21,7 @@ require 'new_relic/agent/event_listener'
 require 'new_relic/agent/cross_app_monitor'
 require 'new_relic/agent/synthetics_monitor'
 require 'new_relic/agent/synthetics_event_buffer'
-require 'new_relic/agent/transaction_event_aggregator'
+require 'new_relic/agent/transaction_event_recorder'
 require 'new_relic/agent/custom_event_aggregator'
 require 'new_relic/agent/sampler_collection'
 require 'new_relic/agent/javascript_instrumentor'
@@ -64,14 +64,17 @@ module NewRelic
         @harvester       = NewRelic::Agent::Harvester.new(@events)
         @after_fork_lock = Mutex.new
 
-        @transaction_event_aggregator = NewRelic::Agent::TransactionEventAggregator.new(@events)
+        @transaction_event_recorder = NewRelic::Agent::TransactionEventRecorder.new
+
         @custom_event_aggregator      = NewRelic::Agent::CustomEventAggregator.new
 
         @connect_state      = :pending
         @connect_attempts   = 0
         @environment_report = nil
+        @waited_on_connect  = nil
+        @connected_pid      = nil
 
-        @obfuscator = lambda {|sql| NewRelic::Agent::Database.default_sql_obfuscator(sql) }
+        @wait_on_connect_reader, @wait_on_connect_writer = IO.pipe
 
         setup_attribute_filter
       end
@@ -101,8 +104,6 @@ module NewRelic
       # instances
       module InstanceMethods
 
-        # holds a proc that is used to obfuscate sql statements
-        attr_reader :obfuscator
         # the statistics engine that holds all the timeslice data
         attr_reader :stats_engine
         # the transaction sampler that handles recording transactions
@@ -136,8 +137,16 @@ module NewRelic
         # GC::Profiler.total_time is not monotonic so we wrap it.
         attr_reader :monotonic_gc_profiler
         attr_reader :custom_event_aggregator
-
+        attr_reader :transaction_event_recorder
         attr_reader :attribute_filter
+
+        def transaction_event_aggregator
+          @transaction_event_recorder.transaction_event_aggregator
+        end
+
+        def synthetics_event_aggregator
+          @transaction_event_recorder.synthetics_event_aggregator
+        end
 
         # This method should be called in a forked process after a fork.
         # It assumes the parent process initialized the agent, but does
@@ -367,33 +376,16 @@ module NewRelic
 
           def should_install_exit_handler?
             (
-              Agent.config[:send_data_on_exit]                  &&
-              !NewRelic::LanguageSupport.using_engine?('rbx')   &&
-              !NewRelic::LanguageSupport.using_engine?('jruby') &&
+              Agent.config[:send_data_on_exit]  &&
+              !NewRelic::LanguageSupport.jruby? &&
               !sinatra_classic_app?
             )
-          end
-
-          # There's an MRI 1.9 bug that loses exit codes in at_exit blocks.
-          # A workaround is necessary to get correct exit codes for the agent's
-          # test suites.
-          # http://bugs.ruby-lang.org/issues/5218
-          def need_exit_code_workaround?
-            defined?(RUBY_ENGINE) && RUBY_ENGINE == "ruby" && RUBY_VERSION.match(/^1\.9/)
           end
 
           def install_exit_handler
             return unless should_install_exit_handler?
             NewRelic::Agent.logger.debug("Installing at_exit handler")
-            at_exit do
-              if need_exit_code_workaround?
-                exit_status = $!.status if $!.is_a?(SystemExit)
-                shutdown
-                exit exit_status if exit_status
-              else
-                shutdown
-              end
-            end
+            at_exit { shutdown }
           end
 
           # Classy logging of the agent version and the current pid,
@@ -466,7 +458,7 @@ module NewRelic
           end
 
           def in_resque_child_process?
-            @service.is_a?(NewRelic::Agent::PipeService)
+            defined?(@service) && @service.is_a?(NewRelic::Agent::PipeService)
           end
 
           # Sanity-check the agent configuration and start the agent,
@@ -546,17 +538,13 @@ module NewRelic
         # Clear out the metric data, errors, and transaction traces, etc.
         def drop_buffered_data
           @stats_engine.reset!
-          @error_collector.reset!
+          @error_collector.drop_buffered_data
           @transaction_sampler.reset!
-          @transaction_event_aggregator.reset!
+          @transaction_event_recorder.drop_buffered_data
           @custom_event_aggregator.reset!
           @sql_sampler.reset!
+          TransactionState.tl_clear
         end
-
-        # Deprecated, and not part of the public API, but here for backwards
-        # compatibility because some 3rd-party gems call it.
-        # @deprecated
-        def reset_stats; drop_buffered_data; end
 
         # Clear out state for any objects that we know lock from our parents
         # This is necessary for cases where we're in a forked child and Ruby
@@ -716,8 +704,8 @@ module NewRelic
           # number of attempts we've made to contact the server
           attr_accessor :connect_attempts
 
-          # Disconnect just sets connected to false, which prevents
-          # the agent from trying to connect again
+          # Disconnect just sets the connect state to disconnected, preventing
+          # further retries.
           def disconnect
             @connect_state = :disconnected
             true
@@ -804,23 +792,19 @@ module NewRelic
           def connect_settings
             sanitize_environment_report
 
-            settings = {
-              :pid => $$,
-              :host => local_host,
-              :app_name => Agent.config.app_names,
-              :language => 'ruby',
-              :labels => Agent.config.parsed_labels,
+            {
+              :pid           => $$,
+              :host          => local_host,
+              :display_host  => Agent.config[:'process_host.display_name'],
+              :app_name      => Agent.config.app_names,
+              :language      => 'ruby',
+              :labels        => Agent.config.parsed_labels,
               :agent_version => NewRelic::VERSION::STRING,
-              :environment => @environment_report,
-              :settings => Agent.config.to_collector_hash,
-              :high_security => Agent.config[:high_security]
+              :environment   => @environment_report,
+              :settings      => Agent.config.to_collector_hash,
+              :high_security => Agent.config[:high_security],
+              :utilization   => UtilizationData.new.to_collector_hash
             }
-
-            unless Agent.config[:disable_utilization]
-              settings[:utilization] = UtilizationData.new.to_collector_hash
-            end
-
-            settings
           end
 
           # Returns connect data passed back from the server
@@ -867,6 +851,30 @@ module NewRelic
             # use Agent.instance.events.subscribe(:finished_configuring) callback instead!
           end
 
+          class WaitOnConnectTimeout < StandardError
+          end
+
+          # Used for testing to let us know we've actually started to wait
+          def waited_on_connect?
+            @waited_on_connect
+          end
+
+          def signal_connected
+            @wait_on_connect_writer << "."
+          end
+
+          def wait_on_connect(timeout)
+            return if connected?
+
+            @waited_on_connect = true
+            NewRelic::Agent.logger.debug("Waiting on connect to complete.")
+            IO.select([@wait_on_connect_reader], nil, nil, timeout)
+
+            unless connected?
+              raise WaitOnConnectTimeout, "Agent was unable to connect in #{timeout} seconds."
+            end
+          end
+
           # Logs when we connect to the server, for debugging purposes
           # - makes sure we know if an agent has not connected
           def log_connection!(config_data)
@@ -890,8 +898,9 @@ module NewRelic
           case endpoint
           when :metric_data             then @stats_engine
           when :transaction_sample_data then @transaction_sampler
-          when :error_data              then @error_collector
-          when :analytic_event_data     then @transaction_event_aggregator
+          when :error_data              then @error_collector.error_trace_aggregator
+          when :error_event_data        then @error_collector.error_event_aggregator
+          when :analytic_event_data     then transaction_event_aggregator
           when :custom_event_data       then @custom_event_aggregator
           when :sql_trace_data          then @sql_sampler
           end
@@ -899,7 +908,12 @@ module NewRelic
 
         def merge_data_for_endpoint(endpoint, data)
           if data && !data.empty?
-            container_for_endpoint(endpoint).merge!(data)
+            container = container_for_endpoint endpoint
+            if container.respond_to?(:has_metadata?) && container.has_metadata?
+              container_for_endpoint(endpoint).merge!(data, false)
+            else
+              container_for_endpoint(endpoint).merge!(data)
+            end
           end
         rescue => e
           NewRelic::Agent.logger.error("Error while merging #{endpoint} data from child: ", e)
@@ -907,22 +921,24 @@ module NewRelic
 
         public :merge_data_for_endpoint
 
-        # Connect to the server and validate the license.  If successful,
-        # connected? returns true when finished.  If not successful, you can
-        # keep calling this.  Return false if we could not establish a
-        # connection with the server and we should not retry, such as if
-        # there's a bad license key.
+        # Establish a connection to New Relic servers.
         #
-        # Set keep_retrying=false to disable retrying and return asap, such as when
-        # invoked in the foreground.  Otherwise this runs until a successful
-        # connection is made, or the server rejects us.
+        # By default, if a connection has already been established, this method
+        # will be a no-op.
         #
-        # * <tt>:keep_retrying => false</tt> to only try to connect once, and
-        #   return with the connection set to nil.  This ensures we may try again
-        #   later (default true).
-        # * <tt>force_reconnect => true</tt> if you want to establish a new connection
-        #   to the server before running the worker loop.  This means you get a separate
-        #   agent run and New Relic sees it as a separate instance (default is false).
+        # @param [Hash] options
+        # @option options [Boolean] :keep_retrying (true)
+        #   If true, this method will block until a connection is successfully
+        #   established, continuing to retry upon failure. If false, this method
+        #   will return after either successfully connecting, or after failing
+        #   once.
+        #
+        # @option options [Boolean] :force_reconnect (false)
+        #   If true, this method will force establishment of a new connection
+        #   with New Relic, even if there is already an existing connection.
+        #   This is useful primarily when re-establishing a new connection after
+        #   forking off from a parent process.
+        #
         def connect(options={})
           defaults = {
             :keep_retrying => Agent.config[:keep_retrying],
@@ -936,6 +952,7 @@ module NewRelic
           query_server_for_configuration
           @connected_pid = $$
           @connect_state = :connected
+          signal_connected
         rescue NewRelic::Agent::ForceDisconnectException => e
           handle_force_disconnect(e)
         rescue NewRelic::Agent::LicenseException => e
@@ -949,8 +966,6 @@ module NewRelic
             ::NewRelic::Agent.logger.info "Will re-attempt in #{connect_retry_period} seconds"
             sleep connect_retry_period
             retry
-          else
-            disconnect
           end
         rescue Exception => e
           ::NewRelic::Agent.logger.error "Exception of unexpected type during Agent#connect():", e
@@ -980,19 +995,31 @@ module NewRelic
         # The given container should respond to:
         #
         #  #harvest!
-        #    returns an enumerable collection of data items to be sent to the
-        #    collector.
+        #    returns a payload that contains enumerable collection of data items and
+        #    optional metadata to be sent to the collector.
         #
         #  #reset!
         #    drop any stored data and reset to a clean state.
         #
-        #  #merge!(items)
-        #    merge the given items back into the internal buffer of the
-        #    container, so that they may be harvested again later.
+        #  #merge!(payload)
+        #    merge the given payload back into the internal buffer of the
+        #    container, so that it may be harvested again later.
         #
         def harvest_and_send_from_container(container, endpoint)
-          items = harvest_from_container(container, endpoint)
-          send_data_to_endpoint(endpoint, items, container) unless items.empty?
+          payload = harvest_from_container(container, endpoint)
+          sample_count = harvest_size container, payload
+          if sample_count > 0
+            NewRelic::Agent.logger.debug("Sending #{sample_count} items to #{endpoint}")
+            send_data_to_endpoint(endpoint, payload, container)
+          end
+        end
+
+        def harvest_size container, items
+          if container.respond_to?(:has_metadata?) && container.has_metadata? && !items.empty?
+            items.last.size
+          else
+            items.size
+          end
         end
 
         def harvest_from_container(container, endpoint)
@@ -1006,10 +1033,9 @@ module NewRelic
           items
         end
 
-        def send_data_to_endpoint(endpoint, items, container)
-          NewRelic::Agent.logger.debug("Sending #{items.size} items to #{endpoint}")
+        def send_data_to_endpoint(endpoint, payload, container)
           begin
-            @service.send(endpoint, items)
+            @service.send(endpoint, payload)
           rescue ForceRestartException, ForceDisconnectException
             raise
           rescue SerializationError => e
@@ -1018,10 +1044,10 @@ module NewRelic
             NewRelic::Agent.logger.warn("#{endpoint} data was rejected by remote service, discarding. Error: ", e)
           rescue ServerConnectionException => e
             log_remote_unavailable(endpoint, e)
-            container.merge!(items)
+            container.merge!(payload)
           rescue => e
             NewRelic::Agent.logger.info("Unable to send #{endpoint} data, will try again later. Error: ", e)
-            container.merge!(items)
+            container.merge!(payload)
           end
         end
 
@@ -1049,12 +1075,17 @@ module NewRelic
         end
 
         def harvest_and_send_errors
-          harvest_and_send_from_container(@error_collector, :error_data)
+          harvest_and_send_from_container(@error_collector.error_trace_aggregator, :error_data)
         end
 
         def harvest_and_send_analytic_event_data
-          harvest_and_send_from_container(@transaction_event_aggregator, :analytic_event_data)
+          harvest_and_send_from_container(transaction_event_aggregator, :analytic_event_data)
+          harvest_and_send_from_container(synthetics_event_aggregator, :analytic_event_data)
           harvest_and_send_from_container(@custom_event_aggregator,      :custom_event_data)
+        end
+
+        def harvest_and_send_error_event_data
+          harvest_and_send_from_container @error_collector.error_event_aggregator, :error_event_data
         end
 
         def check_for_and_handle_agent_commands
@@ -1100,6 +1131,7 @@ module NewRelic
           @events.notify(:before_harvest)
           @service.session do # use http keep-alive
             harvest_and_send_errors
+            harvest_and_send_error_event_data
             harvest_and_send_transaction_traces
             harvest_and_send_slowest_sql
             harvest_and_send_timeslice_data

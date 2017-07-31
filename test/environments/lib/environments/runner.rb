@@ -4,21 +4,20 @@
 
 require 'bundler'
 
-require File.expand_path(File.join(File.dirname(__FILE__), '..', '..', '..', 'multiverse', 'lib', 'multiverse', 'color'))
+require File.expand_path '../../../../multiverse/lib/multiverse/color', __FILE__
+require File.expand_path '../../../../multiverse/lib/multiverse/shell_utils', __FILE__
 
 module Environments
   class Runner
     include Multiverse::Color
 
     BLACKLIST = {
+      "2.2.1"       => ["rails50"],
+      "2.2"         => ["rails50"],
+      "2.1"         => ["rails50"],
+      "2.0"         => ["rails50"],
       "2"           => ["rails21", "rails22", "rails23"],
-      "1.9"         => ["rails21", "rails22"],
-      "1.9.2"       => ["rails40", "rails41", "rails42"],
-      "1.8.7"       => ["rails40", "rails41", "rails42"],
-      "ree"         => ["rails40", "rails41", "rails42"],
-      "jruby-1.6"   => ["rails40", "rails41", "rails42"],
-      "jruby-1.7"   => ["rails21", "rails22", "rails23"],
-      "rbx-2.0"     => ["rails21", "rails22", "rails23", "rails30", "rails31", "rails32"],
+      "jruby-9.0"   => ["rails21", "rails22", "rails23", "rails30", "rails31", "rails32"]
     }
 
     attr_reader :envs
@@ -28,7 +27,7 @@ module Environments
     end
 
     def env_root
-      File.join(File.dirname(__FILE__), "..", "..")
+      File.expand_path '../../..', __FILE__
     end
 
     def run_and_report
@@ -63,9 +62,7 @@ module Environments
       dirs = potential_directories
 
       version = RUBY_VERSION
-      version = "ree" if defined?(RUBY_DESCRIPTION) && RUBY_DESCRIPTION =~ /Ruby Enterprise Edition/
       version = "jruby-#{JRUBY_VERSION[0..2]}" if defined?(JRUBY_VERSION)
-      version = "rbx-2.0" if defined?(RUBY_ENGINE) && RUBY_ENGINE == "rbx"
 
       BLACKLIST.each do |check_version, blacklisted|
         if version.start_with?(check_version)
@@ -89,14 +86,15 @@ module Environments
 
     def bundle(dir)
       puts "Bundling in #{dir}..."
-      bundling = `cd #{dir} && bundle install --local`
+      result = `cd #{dir} && bundle install --local`
       unless $?.success?
         puts "Failed local bundle, trying again with full bundle..."
-        bundling = `cd #{dir} && bundle install`
+        command = "cd #{dir} && bundle install --retry 3"
+        result = Multiverse::ShellUtils.try_command_n_times(command, 3)
       end
 
-      bundling = red(bundling) unless $?.success?
-      puts bundling
+      result = red(result) unless $?.success?
+      puts result
       $?
     end
 

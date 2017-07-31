@@ -23,6 +23,7 @@ class AuditLoggerTest < Minitest::Test
 
   def teardown
     NewRelic::Agent.config.reset_to_defaults
+    NewRelic::Agent::Hostname.instance_variable_set(:@hostname, nil)
   end
 
   def setup_fake_logger
@@ -64,6 +65,7 @@ class AuditLoggerTest < Minitest::Test
   end
 
   def test_log_formatter
+    NewRelic::Agent::Hostname.instance_variable_set(:@hostname, nil)
     Socket.stubs(:gethostname).returns('dummyhost')
     formatter = NewRelic::Agent::AuditLogger.new.create_log_formatter
     time = '2012-01-01 00:00:00'
@@ -75,6 +77,7 @@ class AuditLoggerTest < Minitest::Test
 
   def test_log_formatter_to_stdout
     with_config(:'audit_log.path' => "STDOUT") do
+      NewRelic::Agent::Hostname.instance_variable_set(:@hostname, nil)
       Socket.stubs(:gethostname).returns('dummyhost')
       formatter = NewRelic::Agent::AuditLogger.new.create_log_formatter
       time = '2012-01-01 00:00:00'
@@ -125,21 +128,12 @@ class AuditLoggerTest < Minitest::Test
     @logger.log_request(@uri, data, @marshaller)
   end
 
-  def test_logs_inspect_with_pruby_marshaller
-    setup_fake_logger
-    pruby_marshaller = NewRelic::Agent::NewRelicService::PrubyMarshaller.new
-    @logger.log_request(@uri, @dummy_data, pruby_marshaller)
-    assert_log_contains_string(@dummy_data.inspect)
-  end
-
   def test_logs_json_with_json_marshaller
     marshaller_cls = NewRelic::Agent::NewRelicService::JsonMarshaller
-    if marshaller_cls.is_supported?
-      setup_fake_logger
-      json_marshaller = marshaller_cls.new
-      @logger.log_request(@uri, @dummy_data, json_marshaller)
-      assert_audit_log_contains_object(read_log_body, @dummy_data, :json)
-    end
+    setup_fake_logger
+    json_marshaller = marshaller_cls.new
+    @logger.log_request(@uri, @dummy_data, json_marshaller)
+    assert_audit_log_contains_object(read_log_body, @dummy_data, :json)
   end
 
   def test_allows_through_endpoints
@@ -161,6 +155,7 @@ class AuditLoggerTest < Minitest::Test
   end
 
   def test_should_cache_hostname
+    NewRelic::Agent::Hostname.instance_variable_set(:@hostname, nil)
     Socket.expects(:gethostname).once.returns('cachey-mccaherson')
     setup_fake_logger
     3.times do

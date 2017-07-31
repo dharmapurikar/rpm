@@ -208,11 +208,19 @@ class NewRelicServiceTest < Minitest::Test
     end
   end
 
-  def test_initialize_uses_correct_license_key_settings
+  def test_initialize_uses_license_key_from_config
     with_config(:license_key => 'abcde') do
       service = NewRelic::Agent::NewRelicService.new
-      assert_equal 'abcde', service.instance_variable_get(:@license_key)
+      assert_equal 'abcde', service.send(:license_key)
     end
+  end
+
+  def test_initialize_uses_license_key_from_manual_start
+    service = NewRelic::Agent::NewRelicService.new
+    NewRelic::Agent.manual_start :license_key => "geronimo"
+
+    assert_equal 'geronimo', service.send(:license_key)
+    NewRelic::Agent.shutdown
   end
 
   def test_connect_sets_agent_id_and_config_data
@@ -267,7 +275,6 @@ class NewRelicServiceTest < Minitest::Test
     @http_handle.respond_to(:metric_data, dummy_rsp)
     stats_hash = NewRelic::Agent::StatsHash.new
     stats_hash.harvested_at = Time.now
-    @service.expects(:fill_metric_id_cache).with(dummy_rsp)
     response = @service.metric_data(stats_hash)
 
     assert_equal 4, @http_handle.last_request_payload.size
@@ -276,7 +283,6 @@ class NewRelicServiceTest < Minitest::Test
 
   def test_metric_data_sends_harvest_timestamps
     @http_handle.respond_to(:metric_data, 'foo')
-    @service.stubs(:fill_metric_id_cache)
 
     t0 = freeze_time
     stats_hash = NewRelic::Agent::StatsHash.new
@@ -295,36 +301,6 @@ class NewRelicServiceTest < Minitest::Test
     _, last_harvest_timestamp, harvest_timestamp, _ = payload
     assert_in_delta(t1.to_f, harvest_timestamp, 0.0001)
     assert_in_delta(t0.to_f, last_harvest_timestamp, 0.0001)
-  end
-
-  def test_fill_metric_id_cache_from_collect_response
-    response = [[{"scope"=>"Controller/blogs/index", "name"=>"Database/SQL/other"}, 1328],
-                [{"scope"=>"", "name"=>"WebFrontend/QueueTime"}, 10],
-                [{"scope"=>"", "name"=>"ActiveRecord/Blog/find"}, 1017]]
-
-    @service.send(:fill_metric_id_cache, response)
-
-    cache = @service.metric_id_cache
-    assert_equal 1328, cache[NewRelic::MetricSpec.new('Database/SQL/other', 'Controller/blogs/index')]
-    assert_equal 10,   cache[NewRelic::MetricSpec.new('WebFrontend/QueueTime')]
-    assert_equal 1017, cache[NewRelic::MetricSpec.new('ActiveRecord/Blog/find')]
-  end
-
-  def test_caches_metric_ids_for_future_use
-    dummy_rsp = [[{ 'name' => 'a', 'scope' => '' }, 42]]
-    @http_handle.respond_to(:metric_data, dummy_rsp)
-
-    hash = build_stats_hash('a' => 1)
-
-    @service.metric_data(hash)
-
-    hash = build_stats_hash('a' => 1)
-    stats = hash[NewRelic::MetricSpec.new('a')]
-
-    results = @service.build_metric_data_array(hash)
-    assert_nil(results.first.metric_spec)
-    assert_equal(stats, results.first.stats)
-    assert_equal(42, results.first.metric_id)
   end
 
   def test_metric_data_harvest_time_based_on_stats_hash_creation
@@ -363,8 +339,14 @@ class NewRelicServiceTest < Minitest::Test
 
   def test_analytic_event_data
     @http_handle.respond_to(:analytic_event_data, 'some analytic events')
-    response = @service.analytic_event_data([])
+    response = @service.analytic_event_data([{}, []])
     assert_equal 'some analytic events', response
+  end
+
+  def error_event_data
+    @http_handle.respond_to(:error_event_data, 'some error events')
+    response = @service.error_event_data([{}, []])
+    assert_equal 'some error events', response
   end
 
   # Although thread profiling is only available in some circumstances, the
@@ -377,7 +359,7 @@ class NewRelicServiceTest < Minitest::Test
 
   def test_profile_data_does_not_normalize_encodings
     @http_handle.respond_to(:profile_data, nil)
-    NewRelic::JSONWrapper.expects(:normalize).never
+    NewRelic::Agent::EncodingNormalizer.expects(:normalize_object).never
     @service.profile_data([])
   end
 
@@ -421,7 +403,6 @@ class NewRelicServiceTest < Minitest::Test
 
     @service.connect
     @http_handle.respond_to(:metric_data, 0)
-    @service.stubs(:fill_metric_id_cache)
     stats_hash = NewRelic::Agent::StatsHash.new
     stats_hash.harvested_at = Time.now
     @service.metric_data(stats_hash)
@@ -460,142 +441,114 @@ class NewRelicServiceTest < Minitest::Test
     end
   end
 
-  if NewRelic::Agent::NewRelicService::JsonMarshaller.is_supported?
-    def test_json_marshaller_handles_responses_from_collector
-      marshaller = NewRelic::Agent::NewRelicService::JsonMarshaller.new
-      assert_equal ['beep', 'boop'], marshaller.load('{"return_value": ["beep","boop"]}')
-    end
+  def test_json_marshaller_handles_responses_from_collector
+    marshaller = NewRelic::Agent::NewRelicService::JsonMarshaller.new
+    assert_equal ['beep', 'boop'], marshaller.load('{"return_value": ["beep","boop"]}')
+  end
 
-    def test_json_marshaller_handles_errors_from_collector
-      marshaller = NewRelic::Agent::NewRelicService::JsonMarshaller.new
-      assert_raises(NewRelic::Agent::NewRelicService::CollectorError,
-                   'JavaCrash: error message') do
-        marshaller.load('{"exception": {"message": "error message", "error_type": "JavaCrash"}}')
-      end
-    end
-
-    def test_json_marshaller_logs_on_empty_response_from_collector
-      marshaller = NewRelic::Agent::NewRelicService::JsonMarshaller.new
-      expects_logging(:error, any_parameters)
-      assert_nil marshaller.load('')
-    end
-
-    def test_json_marshaller_logs_on_nil_response_from_collector
-      marshaller = NewRelic::Agent::NewRelicService::JsonMarshaller.new
-      expects_logging(:error, any_parameters)
-      assert_nil marshaller.load(nil)
-    end
-
-    def test_raises_serialization_error_if_json_serialization_fails
-      ::NewRelic::JSONWrapper.stubs(:dump).raises(RuntimeError.new('blah'))
-      assert_raises(NewRelic::Agent::SerializationError) do
-        @service.send(:invoke_remote, 'wiggle', [{}])
-      end
-    end
-
-    def test_raises_serialization_error_if_encoding_normalization_fails
-      with_config(:normalize_json_string_encodings => true) do
-        @http_handle.respond_to(:wiggle, 'hi')
-        NewRelic::JSONWrapper.stubs(:normalize).raises('blah')
-        assert_raises(NewRelic::Agent::SerializationError) do
-          @service.send(:invoke_remote, 'wiggle', [{}])
-        end
-      end
-    end
-
-    def test_skips_normalization_if_configured_to
-      @http_handle.respond_to(:wiggle, 'hello')
-      with_config(:normalize_json_string_encodings => false) do
-        NewRelic::JSONWrapper.expects(:normalize).never
-        @service.send(:invoke_remote, 'wiggle', [{ 'foo' => 'bar' }])
-      end
-    end
-
-    def test_json_marshaller_handles_binary_strings
-      input_string = (0..255).to_a.pack("C*")
-      roundtripped_string = roundtrip_data(input_string)
-
-      if NewRelic::LanguageSupport.supports_string_encodings?
-        assert_equal(Encoding.find('ASCII-8BIT'), input_string.encoding)
-      end
-
-      expected = force_to_utf8(input_string.dup)
-      assert_equal(expected, roundtripped_string)
-    end
-
-    if NewRelic::LanguageSupport.supports_string_encodings?
-      def test_json_marshaller_handles_strings_with_incorrect_encoding
-        input_string = (0..255).to_a.pack("C*").force_encoding("UTF-8")
-        roundtripped_string = roundtrip_data(input_string)
-
-        assert_equal(Encoding.find('UTF-8'), input_string.encoding)
-        expected = input_string.dup.force_encoding('ISO-8859-1').encode('UTF-8')
-        assert_equal(expected, roundtripped_string)
-      end
-    end
-
-    def test_json_marshaller_failure_when_not_normalizing
-      input_string = (0..255).to_a.pack("C*")
-      assert_raises(NewRelic::Agent::SerializationError) do
-        roundtrip_data(input_string, false)
-      end
-    end
-
-    def test_json_marshaller_should_handle_crazy_strings
-      root = generate_object_graph_with_crazy_strings
-      result = roundtrip_data(root)
-
-      # Note that there's technically a possibility of collision here:
-      # if two of the randomly-generated key strings happen to normalize to the
-      # same value, we might see <100 results, but the chances of this seem
-      # vanishingly small.
-      assert_equal(100, result.length)
-    end
-
-    def test_normalization_should_account_for_to_collector_array
-      binary_string = generate_random_byte_sequence
-      data = DummyDataClass.new(binary_string, [])
-      result = roundtrip_data(data)
-
-      expected_string = force_to_utf8(binary_string)
-      assert_equal(expected_string, result[0])
-    end
-
-    def test_normalization_should_account_for_to_collector_array_with_nested_encodings
-      binary_string = generate_random_byte_sequence
-      data = DummyDataClass.new(binary_string, [binary_string])
-      result = roundtrip_data(data)
-
-      expected_string = force_to_utf8(binary_string)
-      assert_equal(expected_string, result[0])
-
-      base64_encoded_compressed_json_field = result[1]
-      compressed_json_field = Base64.decode64(base64_encoded_compressed_json_field)
-      json_field = Zlib::Inflate.inflate(compressed_json_field)
-      field = JSON.parse(json_field)
-
-      assert_equal([expected_string], field)
+  def test_json_marshaller_handles_errors_from_collector
+    marshaller = NewRelic::Agent::NewRelicService::JsonMarshaller.new
+    assert_raises(NewRelic::Agent::NewRelicService::CollectorError,
+                 'JavaCrash: error message') do
+      marshaller.load('{"exception": {"message": "error message", "error_type": "JavaCrash"}}')
     end
   end
 
-  def test_pruby_marshaller_handles_errors_from_collector
-    marshaller = NewRelic::Agent::NewRelicService::PrubyMarshaller.new
-    assert_raises(NewRelic::Agent::NewRelicService::CollectorError, 'error message') do
-      marshaller.load(Marshal.dump({"exception" => {"message" => "error message",
-                                       "error_type" => "JavaCrash"}}))
-    end
-  end
-
-  def test_pruby_marshaller_logs_on_empty_response_from_collector
-    marshaller = NewRelic::Agent::NewRelicService::PrubyMarshaller.new
+  def test_json_marshaller_logs_on_empty_response_from_collector
+    marshaller = NewRelic::Agent::NewRelicService::JsonMarshaller.new
     expects_logging(:error, any_parameters)
     assert_nil marshaller.load('')
   end
 
-  def test_pruby_marshaller_logs_on_nil_response_from_collector
-    marshaller = NewRelic::Agent::NewRelicService::PrubyMarshaller.new
+  def test_json_marshaller_logs_on_nil_response_from_collector
+    marshaller = NewRelic::Agent::NewRelicService::JsonMarshaller.new
     expects_logging(:error, any_parameters)
     assert_nil marshaller.load(nil)
+  end
+
+  def test_raises_serialization_error_if_json_serialization_fails
+    ::JSON.stubs(:dump).raises(RuntimeError.new('blah'))
+    assert_raises(NewRelic::Agent::SerializationError) do
+      @service.send(:invoke_remote, 'wiggle', [{}])
+    end
+  end
+
+  def test_raises_serialization_error_if_encoding_normalization_fails
+    with_config(:normalize_json_string_encodings => true) do
+      @http_handle.respond_to(:wiggle, 'hi')
+      NewRelic::Agent::EncodingNormalizer.stubs(:normalize_object).raises('blah')
+      assert_raises(NewRelic::Agent::SerializationError) do
+        @service.send(:invoke_remote, 'wiggle', [{}])
+      end
+    end
+  end
+
+  def test_skips_normalization_if_configured_to
+    @http_handle.respond_to(:wiggle, 'hello')
+    with_config(:normalize_json_string_encodings => false) do
+      NewRelic::Agent::EncodingNormalizer.expects(:normalize_object).never
+      @service.send(:invoke_remote, 'wiggle', [{ 'foo' => 'bar' }])
+    end
+  end
+
+  def test_json_marshaller_handles_binary_strings
+    input_string = (0..255).to_a.pack("C*")
+    roundtripped_string = roundtrip_data(input_string)
+    assert_equal(Encoding.find('ASCII-8BIT'), input_string.encoding)
+    expected = force_to_utf8(input_string.dup)
+    assert_equal(expected, roundtripped_string)
+  end
+
+  def test_json_marshaller_handles_strings_with_incorrect_encoding
+    input_string = (0..255).to_a.pack("C*").force_encoding("UTF-8")
+    roundtripped_string = roundtrip_data(input_string)
+
+    assert_equal(Encoding.find('UTF-8'), input_string.encoding)
+    expected = input_string.dup.force_encoding('ISO-8859-1').encode('UTF-8')
+    assert_equal(expected, roundtripped_string)
+  end
+
+  def test_json_marshaller_failure_when_not_normalizing
+    input_string = (0..255).to_a.pack("C*")
+    assert_raises(NewRelic::Agent::SerializationError) do
+      roundtrip_data(input_string, false)
+    end
+  end
+
+  def test_json_marshaller_should_handle_crazy_strings
+    root = generate_object_graph_with_crazy_strings
+    result = roundtrip_data(root)
+
+    # Note that there's technically a possibility of collision here:
+    # if two of the randomly-generated key strings happen to normalize to the
+    # same value, we might see <100 results, but the chances of this seem
+    # vanishingly small.
+    assert_equal(100, result.length)
+  end
+
+  def test_normalization_should_account_for_to_collector_array
+    binary_string = generate_random_byte_sequence
+    data = DummyDataClass.new(binary_string, [])
+    result = roundtrip_data(data)
+
+    expected_string = force_to_utf8(binary_string)
+    assert_equal(expected_string, result[0])
+  end
+
+  def test_normalization_should_account_for_to_collector_array_with_nested_encodings
+    binary_string = generate_random_byte_sequence
+    data = DummyDataClass.new(binary_string, [binary_string])
+    result = roundtrip_data(data)
+
+    expected_string = force_to_utf8(binary_string)
+    assert_equal(expected_string, result[0])
+
+    base64_encoded_compressed_json_field = result[1]
+    compressed_json_field = Base64.decode64(base64_encoded_compressed_json_field)
+    json_field = Zlib::Inflate.inflate(compressed_json_field)
+    field = JSON.parse(json_field)
+
+    assert_equal([expected_string], field)
   end
 
   def test_compress_request_if_needed_compresses_large_payloads
@@ -692,25 +645,6 @@ class NewRelicServiceTest < Minitest::Test
     metric_data_2 = metric_data_array.find { |md| md.metric_spec == spec2 }
     assert_equal(hash[spec1], metric_data_1.stats)
     assert_equal(hash[spec2], metric_data_2.stats)
-  end
-
-  def test_build_metric_data_array_uses_metric_id_cache_if_possible
-    hash = NewRelic::Agent::StatsHash.new
-
-    spec1 = NewRelic::MetricSpec.new('foo')
-    spec2 = NewRelic::MetricSpec.new('bar')
-    hash.record(spec1, 1)
-    hash.record(spec2, 1)
-
-    @service.stubs(:metric_id_cache).returns({ spec1 => 42 })
-    metric_data_array = @service.build_metric_data_array(hash)
-
-    assert_equal(2, metric_data_array.size)
-
-    metric_data1 = metric_data_array.find { |md| md.metric_id == 42 }
-    metric_data2 = metric_data_array.find { |md| md.metric_spec == spec2 }
-    assert_nil(metric_data1.metric_spec)
-    assert_nil(metric_data2.metric_id)
   end
 
   def test_build_metric_data_array_omits_empty_stats
@@ -818,16 +752,16 @@ class NewRelicServiceTest < Minitest::Test
     ])
   end
 
-  def test_force_restart_clears_metric_cache
-    @service.metric_id_cache[1] = "boo"
-    @service.force_restart
-    assert_empty @service.metric_id_cache
-  end
-
   def test_force_restart_closes_shared_connections
     @service.establish_shared_connection
     @service.force_restart
     refute @service.has_shared_connection?
+  end
+
+  def test_marshal_with_json_only
+    with_config(:marshaller => 'pruby') do
+      assert_equal 'json', @service.marshaller.format
+    end
   end
 
   def build_stats_hash(items={})
@@ -840,11 +774,7 @@ class NewRelicServiceTest < Minitest::Test
   end
 
   def force_to_utf8(string)
-    if NewRelic::LanguageSupport.supports_string_encodings?
-      string.force_encoding('ISO-8859-1').encode('UTF-8')
-    else
-      Iconv.iconv('utf-8', 'iso-8859-1', string).join
-    end
+    string.force_encoding('ISO-8859-1').encode('UTF-8')
   end
 
   def generate_random_byte_sequence(length=255, encoding=nil)
@@ -869,11 +799,7 @@ class NewRelicServiceTest < Minitest::Test
   end
 
   def random_encoding
-    if NewRelic::LanguageSupport.supports_string_encodings?
-      Encoding.list.sample
-    else
-      nil
-    end
+    Encoding.list.sample
   end
 
   def roundtrip_data(data, normalize = true)
@@ -974,15 +900,9 @@ class NewRelicServiceTest < Minitest::Test
     end
 
     def create_response_mock(payload, opts={})
-      if NewRelic::Agent::NewRelicService::JsonMarshaller.is_supported?
-        format = :json
-      else
-        format = :pruby
-      end
-
       opts = {
         :code => 200,
-        :format => format
+        :format => :json
       }.merge(opts)
 
       if opts[:code] == 401
@@ -997,11 +917,7 @@ class NewRelicServiceTest < Minitest::Test
         klass = HTTPSuccess
       end
 
-      if opts[:format] == :json
-        klass.new(JSON.dump('return_value' => payload), opts[:code], {})
-      else
-        klass.new(Marshal.dump('return_value' => payload), opts[:code], {})
-      end
+      klass.new(JSON.dump('return_value' => payload), opts[:code], {})
     end
 
     def respond_to(method, payload, opts={})

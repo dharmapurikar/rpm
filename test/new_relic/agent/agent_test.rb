@@ -30,7 +30,11 @@ module NewRelic
 
       def test_after_fork_reporting_to_channel
         @agent.stubs(:connected?).returns(true)
-        @agent.after_fork(:report_to_channel => 123)
+
+        with_config(:monitor_mode => true) do
+          @agent.after_fork(:report_to_channel => 123)
+        end
+
         assert(@agent.service.kind_of?(NewRelic::Agent::PipeService),
                'Agent should use PipeService when directed to report to pipe channel')
         NewRelic::Agent::PipeService.any_instance.expects(:shutdown).never
@@ -78,8 +82,9 @@ module NewRelic
           @agent.merge_data_for_endpoint(:error_data, errors)
 
           @agent.after_fork(:report_to_channel => 123)
+          errors = @agent.error_collector.error_trace_aggregator.harvest!
 
-          assert_equal 0, @agent.error_collector.errors.length, "Still got errors collected in parent"
+          assert_equal 0, errors.length, "Still got errors collected in parent"
         end
       end
 
@@ -180,9 +185,9 @@ module NewRelic
       def test_harvest_and_send_errors_merges_back_on_failure
         errors = [mock('e0'), mock('e1')]
 
-        @agent.error_collector.expects(:harvest!).returns(errors)
+        @agent.error_collector.error_trace_aggregator.expects(:harvest!).returns(errors)
         @agent.service.stubs(:error_data).raises('wat')
-        @agent.error_collector.expects(:merge!).with(errors)
+        @agent.error_collector.error_trace_aggregator.expects(:merge!).with(errors)
 
         @agent.send :harvest_and_send_errors
       end
@@ -200,7 +205,7 @@ module NewRelic
         nthreads.times do |tid|
           t = Thread.new do
             nmetrics.times do |mid|
-              @agent.stats_engine.get_stats("m#{mid}").record_data_point(1)
+              @agent.stats_engine.tl_record_unscoped_metrics("m#{mid}", 1)
             end
           end
           t.abort_on_exception = true
@@ -231,7 +236,7 @@ module NewRelic
         @agent.stats_engine.expects(:merge!).never
         @agent.error_collector.expects(:merge!).never
         @agent.transaction_sampler.expects(:merge!).never
-        @agent.instance_variable_get(:@transaction_event_aggregator).expects(:merge!).never
+        @agent.transaction_event_aggregator.expects(:merge!).never
         @agent.sql_sampler.expects(:merge!).never
         @agent.merge_data_for_endpoint(:metric_data, [])
         @agent.merge_data_for_endpoint(:transaction_sample_data, [])
@@ -255,17 +260,18 @@ module NewRelic
 
         @agent.merge_data_for_endpoint(:error_data, errors)
 
-        assert_equal 20, @agent.error_collector.errors.length
+        error_traces = @agent.error_collector.error_trace_aggregator.harvest!
+        assert_equal 20, error_traces.length
 
         # This method should NOT increment error counts, since that has already
         # been counted in the child
-        assert_equal 0, @agent.stats_engine.get_stats("Errors/all").call_count
+        assert_metrics_not_recorded "Errors/all"
       end
 
       def test_harvest_and_send_analytic_event_data_merges_in_samples_on_failure
         service = @agent.service
-        transaction_event_aggregator = @agent.instance_variable_get(:@transaction_event_aggregator)
-        samples = [mock('some analytics event')]
+        transaction_event_aggregator = @agent.transaction_event_aggregator
+        samples = [{:reservoir_size => 100, :events_seen => 1}, [mock('some analytics event')]]
 
         transaction_event_aggregator.expects(:harvest!).returns(samples)
         transaction_event_aggregator.expects(:merge!).with(samples)
@@ -305,7 +311,6 @@ module NewRelic
       def test_connect_does_not_retry_if_keep_retrying_false
         @agent.service.expects(:connect).once.raises(Timeout::Error)
         @agent.send(:connect, :keep_retrying => false)
-        assert(@agent.disconnected?)
       end
 
       def test_connect_does_not_retry_on_license_error
@@ -376,6 +381,7 @@ module NewRelic
         expected = [
          :pid,
          :host,
+         :display_host,
          :app_name,
          :language,
          :labels,
@@ -409,6 +415,79 @@ module NewRelic
           ]
           assert_equal expected, @agent.connect_settings[:labels]
         end
+      end
+
+      def test_wait_on_connect
+        error = nil
+        connected = false
+        thread = Thread.new do
+          begin
+            @agent.wait_on_connect(2)
+            connected = true
+          rescue => e
+            error = e
+          end
+        end
+
+        until @agent.waited_on_connect? do
+          # hold on there....
+        end
+
+        @agent.stubs(:connected?).returns(true)
+        @agent.signal_connected
+        thread.join
+
+        refute error, error
+        assert connected
+      end
+
+      def test_wait_raises_if_not_connected_once_signaled
+        error = nil
+        thread = Thread.new do
+          begin
+            @agent.wait_on_connect(2)
+          rescue => e
+            error = e
+          end
+        end
+
+        until @agent.waited_on_connect? do
+          # hold on there....
+        end
+
+        @agent.stubs(:connected?).returns(false)
+        @agent.signal_connected
+        thread.join
+
+        assert error, error
+        assert_kind_of NewRelic::Agent::Agent::Connect::WaitOnConnectTimeout, error
+      end
+
+      def test_wait_raises_if_not_signaled
+        error = nil
+        thread = Thread.new do
+          begin
+            @agent.wait_on_connect(0.01)
+          rescue => e
+            error = e
+          end
+        end
+
+        until @agent.waited_on_connect? do
+          # hold on there....
+        end
+
+        @agent.stubs(:connected?).returns(false)
+        thread.join
+
+        assert error, error
+        assert_kind_of NewRelic::Agent::Agent::Connect::WaitOnConnectTimeout, error
+      end
+
+      def test_wait_when_already_connected
+        @agent.stubs(:connected?).returns(true)
+        @agent.wait_on_connect(2)
+        refute @agent.waited_on_connect?
       end
 
       def test_defer_start_if_resque_dispatcher_and_channel_manager_isnt_started_and_forkable

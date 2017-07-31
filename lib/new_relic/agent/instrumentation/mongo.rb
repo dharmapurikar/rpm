@@ -11,12 +11,27 @@ DependencyDetection.defer do
 
   depends_on do
     require 'new_relic/agent/datastores/mongo'
+    if NewRelic::Agent::Datastores::Mongo.is_unsupported_2x?
+      NewRelic::Agent.logger.log_once(:info, :mongo2, 'Detected unsupported Mongo 2, upgrade your Mongo Driver to 2.1 or newer for instrumentation')
+    end
     NewRelic::Agent::Datastores::Mongo.is_supported_version?
   end
 
   executes do
     NewRelic::Agent.logger.info 'Installing Mongo instrumentation'
-    install_mongo_instrumentation
+    if NewRelic::Agent::Datastores::Mongo.is_monitoring_enabled?
+      install_mongo_command_subscriber
+    else
+      install_mongo_instrumentation
+    end
+  end
+
+  def install_mongo_command_subscriber
+    require 'new_relic/agent/instrumentation/mongodb_command_subscriber'
+    Mongo::Monitoring::Global.subscribe(
+      Mongo::Monitoring::COMMAND,
+      NewRelic::Agent::Instrumentation::MongodbCommandSubscriber.new
+    )
   end
 
   def install_mongo_instrumentation
@@ -41,32 +56,39 @@ DependencyDetection.defer do
 
       # It's key that this method eats all exceptions, as it rests between the
       # Mongo operation the user called and us returning them the data. Be safe!
-      def new_relic_notice_statement(t0, payload, name)
+      def new_relic_notice_statement(segment, payload, name)
         statement = NewRelic::Agent::Datastores::Mongo::StatementFormatter.format(payload, name)
         if statement
-          NewRelic::Agent.instance.transaction_sampler.notice_nosql_statement(statement, (Time.now - t0).to_f)
+          segment.notice_nosql_statement statement
         end
       rescue => e
         NewRelic::Agent.logger.debug("Exception during Mongo statement gathering", e)
       end
 
-      def new_relic_generate_metrics(operation, payload = nil)
-        payload ||= { :collection => self.name, :database => self.db.name }
-        NewRelic::Agent::Datastores::Mongo::MetricTranslator.metrics_for(operation, payload)
+      def new_relic_default_payload
+        { :collection => self.name, :database => self.db.name }
+      end
+
+      def new_relic_start_segment name, payload
+        product = NewRelic::Agent::Datastores::Mongo::MetricTranslator::MONGO_PRODUCT_NAME
+        op_and_col = NewRelic::Agent::Datastores::Mongo::MetricTranslator.operation_and_collection_for name, payload
+        if op_and_col
+          NewRelic::Agent::Transaction.start_datastore_segment product, *op_and_col
+        end
       end
 
       def instrument_with_new_relic_trace(name, payload = {}, &block)
-        metrics = new_relic_generate_metrics(name, payload)
+        segment = new_relic_start_segment name, payload
 
-        trace_execution_scoped(metrics) do
-          t0 = Time.now
-
+        begin
           result = NewRelic::Agent.disable_all_tracing do
             instrument_without_new_relic_trace(name, payload, &block)
           end
 
-          new_relic_notice_statement(t0, payload, name)
+          new_relic_notice_statement(segment, payload, name) if segment
           result
+        ensure
+          segment.finish if segment
         end
       end
 
@@ -78,16 +100,17 @@ DependencyDetection.defer do
   def instrument_save
     ::Mongo::Collection.class_eval do
       def save_with_new_relic_trace(doc, opts = {}, &block)
-        metrics = new_relic_generate_metrics(:save)
-        trace_execution_scoped(metrics) do
-          t0 = Time.now
+        segment = new_relic_start_segment :save, new_relic_default_payload
 
+        begin
           result = NewRelic::Agent.disable_all_tracing do
             save_without_new_relic_trace(doc, opts, &block)
           end
 
-          new_relic_notice_statement(t0, doc, :save)
+          new_relic_notice_statement(segment, doc, :save) if segment
           result
+        ensure
+          segment.finish if segment
         end
       end
 
@@ -99,10 +122,9 @@ DependencyDetection.defer do
   def instrument_ensure_index
     ::Mongo::Collection.class_eval do
       def ensure_index_with_new_relic_trace(spec, opts = {}, &block)
-        metrics = new_relic_generate_metrics(:ensureIndex)
-        trace_execution_scoped(metrics) do
-          t0 = Time.now
+        segment = new_relic_start_segment :ensureIndex, new_relic_default_payload
 
+        begin
           result = NewRelic::Agent.disable_all_tracing do
             ensure_index_without_new_relic_trace(spec, opts, &block)
           end
@@ -116,8 +138,10 @@ DependencyDetection.defer do
                    spec.dup
                  end
 
-          new_relic_notice_statement(t0, spec, :ensureIndex)
+          new_relic_notice_statement(segment, spec, :ensureIndex) if segment
           result
+        ensure
+          segment.finish if segment
         end
       end
 

@@ -12,7 +12,7 @@ module NewRelic
       class Rails < NewRelic::Control::Frameworks::Ruby
 
         def env
-          @env ||= RAILS_ENV.dup
+          @env ||= ( ENV['NEW_RELIC_ENV'] || RAILS_ENV.dup )
         end
 
         # Rails can return an empty string from this method, causing
@@ -58,7 +58,6 @@ module NewRelic
             # is running, if it thinks it's a rake task, or if the agent_enabled is false.
             ::NewRelic::Agent.logger.info("New Relic Agent not running.")
           else
-            install_developer_mode(rails_config) if Agent.config[:developer_mode]
             install_browser_monitoring(rails_config)
             install_agent_hooks(rails_config)
           end
@@ -69,7 +68,7 @@ module NewRelic
         end
 
         def install_agent_hooks(config)
-          return if @agent_hooks_installed
+          return if defined?(@agent_hooks_installed) && @agent_hooks_installed
           @agent_hooks_installed = true
           return if config.nil? || !config.respond_to?(:middleware)
           begin
@@ -83,7 +82,7 @@ module NewRelic
         end
 
         def install_browser_monitoring(config)
-          return if @browser_monitoring_installed
+          return if defined?(@browser_monitoring_installed) && @browser_monitoring_installed
           @browser_monitoring_installed = true
           return if config.nil? || !config.respond_to?(:middleware) || !Agent.config[:'browser_monitoring.auto_instrument']
           begin
@@ -95,27 +94,8 @@ module NewRelic
           end
         end
 
-        def install_developer_mode(rails_config)
-          return if @installed
-          @installed = true
-          if rails_config && rails_config.respond_to?(:middleware)
-            begin
-              require 'new_relic/rack/developer_mode'
-              rails_config.middleware.use NewRelic::Rack::DeveloperMode
-              ::NewRelic::Agent.logger.info("New Relic Agent Developer Mode enabled.")
-              if env == "production"
-                ::NewRelic::Agent.logger.warn("***New Relic Developer Mode is not intended to be enabled in production environments! We highly recommend setting developer_mode: false for the production environment in your newrelic.yml.")
-              end
-            rescue => e
-              ::NewRelic::Agent.logger.warn("Error installing New Relic Developer Mode", e)
-            end
-          elsif rails_config
-            ::NewRelic::Agent.logger.warn("Developer mode not available for Rails versions prior to 2.2")
-          end
-        end
-
         def rails_version
-          @rails_version ||= NewRelic::VersionNumber.new(::Rails::VERSION::STRING)
+          @rails_version ||= Gem::Version.new(::Rails::VERSION::STRING)
         end
 
         protected

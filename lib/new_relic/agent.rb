@@ -29,10 +29,9 @@ module NewRelic
     require 'new_relic/metrics'
     require 'new_relic/metric_spec'
     require 'new_relic/metric_data'
-    require 'new_relic/collection_helper'
     require 'new_relic/noticed_error'
-    require 'new_relic/timer_lib'
 
+    require 'new_relic/agent/encoding_normalizer'
     require 'new_relic/agent/stats'
     require 'new_relic/agent/chained_call'
     require 'new_relic/agent/cross_app_monitor'
@@ -48,6 +47,7 @@ module NewRelic
     require 'new_relic/agent/busy_calculator'
     require 'new_relic/agent/sampler'
     require 'new_relic/agent/database'
+    require 'new_relic/agent/datastores'
     require 'new_relic/agent/pipe_channel_manager'
     require 'new_relic/agent/configuration'
     require 'new_relic/agent/rules_engine'
@@ -55,9 +55,6 @@ module NewRelic
     require 'new_relic/agent/system_info'
 
     require 'new_relic/agent/instrumentation/controller_instrumentation'
-
-    # this is a shim that's here only for backwards compatibility
-    require 'new_relic/agent/instrumentation/metric_frame'
 
     require 'new_relic/agent/samplers/cpu_sampler'
     require 'new_relic/agent/samplers/memory_sampler'
@@ -210,20 +207,42 @@ module NewRelic
       end
     end
 
-    # Notice the error with the given available options:
+    # Send an error to New Relic.
     #
-    # * <tt>:uri</tt> => Request path, minus request params or query string
-    # * <tt>:metric</tt> => The metric name associated with the transaction
-    # * <tt>:custom_params</tt> => Custom parameters
+    # @param [Exception] exception Error you wish to send
+    # @param [Hash]      options Modify how New Relic processes the error
+    # @option options [Hash]    :custom_params Custom parameters to attach to the trace
+    # @option options [Boolean] :expected Only record the error trace
+    #                           (do not affect error rate or Apdex status)
+    # @option options [String]  :uri Request path, minus request params or query string
+    #                           (usually not needed)
+    # @option options [String]  :metric Metric name associated with the transaction
+    #                           (usually not needed)
     #
-    # Previous versions of the agent allowed passing :request_params but
-    # those are now ignored. Associate the request with the enclosing
-    # transaction, or record additional information as custom attributes.
-    # Anything left over is treated as custom params.
+    # Any option keys other than the ones listed here are treated as
+    # <code>:custom_params</code>.
+    #
+    # *Note:* Previous versions of the agent allowed passing
+    # <code>:request_params</code>, but those are now ignored.  If you
+    # need to record the request parameters, call this method inside a
+    # transaction or pass the information in
+    # <code>:custom_params</code>.
+    #
+    # Most of the time, you do not need to specify the
+    # <code>:uri</code> or <code>:metric</code> options; only pass
+    # them if you are calling <code>notice_error</code> outside a
+    # transaction.
     #
     # @api public
     #
     def notice_error(exception, options={})
+
+      if options.has_key?(:trace_only)
+        NewRelic::Agent.logger.log_once(:warn, :trace_only_deprecated,
+          'Passing the :trace_only option to NewRelic::Agent.notice_error is deprecated. Please use :expected instead.')
+        options[:expected] = options.delete(:trace_only)
+      end
+
       Transaction.notice_error(exception, options)
       nil # don't return a noticed error datastructure. it can only hurt.
     end
@@ -286,9 +305,6 @@ module NewRelic
     #
     def manual_start(options={})
       raise "Options must be a hash" unless Hash === options
-      if options[:start_channel_listener]
-        NewRelic::Agent::PipeChannelManager.listener.start
-      end
       NewRelic::Control.instance.init_plugin({ :agent_enabled => true, :sync_startup => true }.merge(options))
     end
 
@@ -357,8 +373,7 @@ module NewRelic
     #
     # @api public
     def require_test_helper
-      path = File.join(__FILE__, '..', '..', '..', 'test', 'agent_helper')
-      require File.expand_path(path)
+      require File.expand_path('../../../test/agent_helper', __FILE__)
     end
 
     # This method sets the block sent to this method as a sql
@@ -608,103 +623,6 @@ module NewRelic
     def browser_timing_header
       return "" unless agent
       agent.javascript_instrumentor.browser_timing_header
-    end
-
-    # @!endgroup
-
-    # @!group Deprecated methods
-
-    # In previous agent releases, this method was required for manual RUM
-    # instrumentation. That work is now all done by the browser_timing_header
-    # method, but this is left for compatibility.
-    #
-    # @api public
-    # @deprecated
-    #
-    def browser_timing_footer
-      ""
-    end
-
-    ADD_CUSTOM_ATTRIBUTES  = "NewRelic::Agent.add_custom_attributes".freeze
-    ADD_CUSTOM_PARAMETERS  = "NewRelic::Agent.add_custom_parameters".freeze
-    ADD_REQUEST_PARAMETERS = "NewRelic::Agent.add_request_parameters".freeze
-    SET_USER_ATTRIBUTES    = "NewRelic::Agent.set_user_attributes".freeze
-
-    # Deprecated. Use add_custom_attributes instead.
-    #
-    # @deprecated
-    # @api public
-    #
-    def add_custom_parameters(*args)
-      NewRelic::Agent::Deprecator.deprecate(ADD_CUSTOM_PARAMETERS, ADD_CUSTOM_ATTRIBUTES)
-      add_custom_attributes(*args)
-    end
-
-    # Deprecated. Use add_custom_attributes instead.
-    #
-    # @deprecated
-    # @api public
-    #
-    def add_request_parameters(*args)
-      NewRelic::Agent::Deprecator.deprecate(ADD_REQUEST_PARAMETERS, ADD_CUSTOM_ATTRIBUTES)
-      add_custom_attributes(*args)
-    end
-
-    # Deprecated. Use add_custom_attributes instead.
-    #
-    # @deprecated
-    # @api public
-    #
-    def set_user_attributes(*args)
-      NewRelic::Agent::Deprecator.deprecate(SET_USER_ATTRIBUTES, ADD_CUSTOM_ATTRIBUTES)
-      add_custom_attributes(*args)
-    end
-
-    # Get or create a statistics gatherer that will aggregate numerical data
-    # under a metric name.
-    #
-    # +metric_name+ should follow a slash separated path convention. Application
-    # specific metrics should begin with "Custom/".
-    #
-    # Return a NewRelic::Agent::Stats that accepts data
-    # via calls to add_data_point(value).
-    #
-    # This method is deprecated in favor of record_metric and increment_metric,
-    # and is not thread-safe.
-    #
-    # @api public
-    # @deprecated
-    #
-    def get_stats(metric_name, use_scope=false)
-      return unless agent
-      agent.stats_engine.get_stats(metric_name, use_scope)
-    end
-
-    alias get_stats_no_scope get_stats
-
-    # Deprecated in favor of drop_buffered_data
-    #
-    # @api public
-    # @deprecated
-    def reset_stats; drop_buffered_data; end
-
-    # Cancel the collection of the current transaction in progress, if
-    # any.  Only affects the transaction started on this thread once
-    # it has started and before it has completed.
-    #
-    # This method has been deprecated in favor of ignore_transaction,
-    # which does what people expect this method to do.
-    #
-    # @api public
-    # @deprecated
-    #
-    def abort_transaction!
-      Transaction.abort_transaction!
-    end
-
-    # Remove after 5/9/15
-    def record_transaction(*args)
-      NewRelic::Agent.logger.warn('This method has been deprecated, please see https://docs.newrelic.com/docs/ruby/ruby-agent-api for current API documentation.')
     end
 
     # @!endgroup

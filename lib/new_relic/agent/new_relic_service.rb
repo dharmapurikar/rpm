@@ -3,11 +3,11 @@
 # See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
 
 require 'zlib'
+require 'timeout'
 require 'new_relic/agent/audit_logger'
 require 'new_relic/agent/new_relic_service/encoders'
 require 'new_relic/agent/new_relic_service/marshaller'
 require 'new_relic/agent/new_relic_service/json_marshaller'
-require 'new_relic/agent/new_relic_service/pruby_marshaller'
 
 module NewRelic
   module Agent
@@ -31,13 +31,16 @@ module NewRelic
       CONNECTION_ERRORS = [Timeout::Error, EOFError, SystemCallError, SocketError].freeze
 
       attr_accessor :request_timeout, :agent_id
-      attr_reader :collector, :marshaller, :metric_id_cache
+      attr_reader :collector, :marshaller
 
       def initialize(license_key=nil, collector=control.server)
-        @license_key = license_key || Agent.config[:license_key]
+        @license_key = license_key
         @collector = collector
         @request_timeout = Agent.config[:timeout]
-        @metric_id_cache = {}
+        @ssl_cert_store = nil
+        @in_session = nil
+        @agent_id = nil
+        @shared_tcp_connection = nil
 
         @audit_logger = ::NewRelic::Agent::AuditLogger.new
         Agent.config.register_callback(:'audit_log.enabled') do |enabled|
@@ -52,16 +55,11 @@ module NewRelic
         end
 
         Agent.config.register_callback(:marshaller) do |marshaller|
-          begin
-            if marshaller == 'json'
-              @marshaller = JsonMarshaller.new
-            else
-              @marshaller = PrubyMarshaller.new
-            end
-          rescue LoadError
-            ::NewRelic::Agent.logger.warn("JSON marshaller requested, but the 'json' gem was not available, falling back to pruby. This will not be supported in future versions of the agent.")
-            @marshaller = PrubyMarshaller.new
+          if marshaller != 'json'
+            ::NewRelic::Agent.logger.warn("Non-JSON marshaller '#{marshaller}' requested but not supported, using JSON marshaller instead. pruby marshalling has been removed as of version 3.14.0.")
           end
+
+          @marshaller = JsonMarshaller.new
         end
       end
 
@@ -82,46 +80,18 @@ module NewRelic
         invoke_remote(:shutdown, [@agent_id, time.to_i]) if @agent_id
       end
 
-      def reset_metric_id_cache
-        @metric_id_cache = {}
-      end
-
       def force_restart
-        reset_metric_id_cache
         close_shared_connection
       end
 
-      # takes an array of arrays of spec and id, adds it into the
-      # metric cache so we can save the collector some work by
-      # sending integers instead of strings the next time around
-      def fill_metric_id_cache(pairs_of_specs_and_ids)
-        Array(pairs_of_specs_and_ids).each do |metric_spec_hash, metric_id|
-          metric_spec = MetricSpec.new(metric_spec_hash['name'],
-                                       metric_spec_hash['scope'])
-          metric_id_cache[metric_spec] = metric_id
-        end
-      rescue => e
-        # If we've gotten this far, we don't want this error to propagate and
-        # make this post appear to have been non-successful, which would trigger
-        # re-aggregation of the same metric data into the next post, so just log
-        NewRelic::Agent.logger.error("Failed to fill metric ID cache from response, error details follow ", e)
-      end
-
-      # The collector wants to recieve metric data in a format that's different
+      # The collector wants to receive metric data in a format that's different
       # from how we store it internally, so this method handles the translation.
-      # It also handles translating metric names to IDs using our metric ID cache.
       def build_metric_data_array(stats_hash)
         metric_data_array = []
         stats_hash.each do |metric_spec, stats|
           # Omit empty stats as an optimization
           unless stats.is_reset?
-            metric_id = metric_id_cache[metric_spec]
-            metric_data = if metric_id
-              NewRelic::MetricData.new(nil, stats, metric_id)
-            else
-              NewRelic::MetricData.new(metric_spec, stats, nil)
-            end
-            metric_data_array << metric_data
+            metric_data_array << NewRelic::MetricData.new(metric_spec, stats)
           end
         end
         metric_data_array
@@ -136,7 +106,6 @@ module NewRelic
           [@agent_id, timeslice_start.to_f, timeslice_end.to_f, metric_data_array],
           :item_count => metric_data_array.size
         )
-        fill_metric_id_cache(result)
         result
       end
 
@@ -172,13 +141,22 @@ module NewRelic
       end
 
       def analytic_event_data(data)
-        invoke_remote(:analytic_event_data, [@agent_id, data],
-          :item_count => data.size)
+        _, items = data
+        invoke_remote(:analytic_event_data, [@agent_id, *data],
+          :item_count => items.size)
       end
 
       def custom_event_data(data)
-        invoke_remote(:custom_event_data, [@agent_id, data],
-          :item_count => data.size)
+        _, items = data
+        invoke_remote(:custom_event_data, [@agent_id, *data],
+          :item_count => items.size)
+      end
+
+      def error_event_data(data)
+        metadata, items = data
+        invoke_remote(:error_event_data, [@agent_id, *data], :item_count => items.size)
+        NewRelic::Agent.record_metric("Supportability/Events/TransactionError/Sent", :count => items.size)
+        NewRelic::Agent.record_metric("Supportability/Events/TransactionError/Seen", :count => metadata[:events_seen])
       end
 
       # We do not compress if content is smaller than 64kb.  There are
@@ -187,8 +165,12 @@ module NewRelic
       def compress_request_if_needed(data)
         encoding = 'identity'
         if data.size > 64 * 1024
-          data = Encoders::Compressed.encode(data)
-          encoding = 'deflate'
+          encoding = Agent.config[:compressed_content_encoding]
+          data = if encoding == 'gzip'
+            Encoders::Compressed::Gzip.encode(data)
+          else
+            Encoders::Compressed::Deflate.encode(data)
+          end
         end
         check_post_size(data)
         [data, encoding]
@@ -286,7 +268,7 @@ module NewRelic
 
       def start_connection(conn)
         NewRelic::Agent.logger.debug("Opening TCP connection to #{conn.address}:#{conn.port}")
-        NewRelic::TimerLib.timeout(@request_timeout) { conn.start }
+        Timeout.timeout(@request_timeout) { conn.start }
         conn
       end
 
@@ -356,12 +338,16 @@ module NewRelic
       # The path on the server that we should post our data to
       def remote_method_uri(method, format)
         params = {'run_id' => @agent_id, 'marshal_format' => format}
-        uri = "/agent_listener/#{PROTOCOL_VERSION}/#{@license_key}/#{method}"
+        uri = "/agent_listener/#{PROTOCOL_VERSION}/#{license_key}/#{method}"
         uri << '?' + params.map do |k,v|
           next unless v
           "#{k}=#{v}"
         end.compact.join('&')
         uri
+      end
+
+      def license_key
+        @license_key ||= Agent.config[:license_key]
       end
 
       # send a message via post to the actual server. This attempts
@@ -455,7 +441,11 @@ module NewRelic
       #                    contact
       #  - :data => the data to send as the body of the request
       def send_request(opts)
-        request = Net::HTTP::Post.new(opts[:uri], 'CONTENT-ENCODING' => opts[:encoding], 'HOST' => opts[:collector].name)
+        if Agent.config[:put_for_data_send]
+          request = Net::HTTP::Put.new(opts[:uri], 'CONTENT-ENCODING' => opts[:encoding], 'HOST' => opts[:collector].name)
+        else
+          request = Net::HTTP::Post.new(opts[:uri], 'CONTENT-ENCODING' => opts[:encoding], 'HOST' => opts[:collector].name)
+        end
         request['user-agent'] = user_agent
         request.content_type = "application/octet-stream"
         request.body = opts[:data]
@@ -467,8 +457,8 @@ module NewRelic
         begin
           attempts += 1
           conn = http_connection
-          ::NewRelic::Agent.logger.debug "Sending request to #{opts[:collector]}#{opts[:uri]}"
-          NewRelic::TimerLib.timeout(@request_timeout) do
+          ::NewRelic::Agent.logger.debug "Sending request to #{opts[:collector]}#{opts[:uri]} with #{request.method}"
+          Timeout.timeout(@request_timeout) do
             response = conn.request(request)
           end
         rescue *CONNECTION_ERRORS => e

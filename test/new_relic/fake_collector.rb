@@ -10,7 +10,7 @@ require 'timeout'
 require 'ostruct'
 require 'fake_server'
 
-require 'json' if RUBY_VERSION >= '1.9'
+require 'json'
 
 module NewRelic
   class FakeCollector < FakeServer
@@ -71,6 +71,7 @@ module NewRelic
         'shutdown'                => Response.new(200, {'return_value' => nil}),
         'analytic_event_data'     => Response.new(200, {'return_value' => nil}),
         'custom_event_data'       => Response.new(200, {'return_value' => nil}),
+        'error_event_data'        => Response.new(200, {'return_value' => nil})
       }
       reset
     end
@@ -99,6 +100,11 @@ module NewRelic
       self.mock[method].override(status, {'exception' => exception})
     end
 
+    def stub_wait(method, wait_time, status=200)
+      self.mock[method] ||= default_response
+      self.mock[method].override(status, Proc.new { sleep(wait_time); {'return_value' => ""}})
+    end
+
     def call(env)
       @last_socket = Thread.current[:WEBrickSocket]
 
@@ -108,15 +114,10 @@ module NewRelic
 
       if uri.path =~ /agent_listener\/\d+\/.+\/(\w+)/
         method = $1
-        format = json_format?(uri) ? :json : :pruby
         if @mock.keys.include? method
           status, body = @mock[method].evaluate
           res.status = status
-          if format == :json
-            res.write ::NewRelic::JSONWrapper.dump(body)
-          else
-            res.write Marshal.dump(body)
-          end
+          res.write ::JSON.dump(body)
         else
           res.status = 500
           res.write "Method not found"
@@ -128,15 +129,7 @@ module NewRelic
           raw_body = req.body.read
           raw_body = Zlib::Inflate.inflate(raw_body) if req.env["HTTP_CONTENT_ENCODING"] == "deflate"
 
-          body = if format == :json
-            body = ::NewRelic::JSONWrapper.load(raw_body)
-          else
-            body = Marshal.load(raw_body)
-
-            # Symbols remain in Ruby-marshalled data, so tidy up so tests can
-            # rely on strings to compare against in fake collector results.
-            body = NewRelic::Agent::EncodingNormalizer.normalize_object(body)
-          end
+          body = ::JSON.load(raw_body)
         rescue
           body = "UNABLE TO DECODE BODY: #{raw_body}"
 
@@ -151,14 +144,10 @@ module NewRelic
         @agent_data << AgentPost.create(:action       => method,
                                         :body         => body,
                                         :run_id       => run_id,
-                                        :format       => format,
+                                        :format       => :json,
                                         :query_params => query_params)
       end
       res.finish
-    end
-
-    def json_format?(uri)
-      uri.query && uri.query.include?('marshal_format=json')
     end
 
     def app
@@ -203,9 +192,11 @@ module NewRelic
         when 'analytic_event_data'
           AnalyticEventDataPost.new(opts)
         when 'custom_event_data'
-          AnalyticEventDataPost.new(opts)
+          CustomEventDataPost.new(opts)
         when 'error_data'
           ErrorDataPost.new(opts)
+        when 'error_event_data'
+          ErrorEventDataPost.new(opts)
         else
           new(opts)
         end
@@ -313,11 +304,23 @@ module NewRelic
       end
 
       class SubmittedTransactionTraceTree
-        attr_reader :attributes
+        attr_reader :attributes, :nodes, :node_params
 
         def initialize(body, format)
           @body = body
           @attributes = body[4]
+          @nodes = extract_by_index(body[3], 2)
+          @node_params = extract_by_index(body[3], 3)
+        end
+
+        def extract_by_index(current, index)
+          result = [current[index]]
+          if current[4].any?
+            current[4].each do |child|
+              result << extract_by_index(child, index)
+            end
+          end
+          result
         end
       end
 
@@ -335,16 +338,19 @@ module NewRelic
       end
     end
 
-    class AnalyticEventDataPost < AgentPost
+    class ReservoirSampledContainerPost < AgentPost
+      attr_reader :reservoir_metadata, :events
 
-      attr_reader :events
-
-      def initialize(opts={})
+      def initialize opts={}
         super
-
-        @events = @body[1]
+        @reservoir_metadata = body[1]
+        @events = body[2]
       end
     end
+
+    class AnalyticEventDataPost < ReservoirSampledContainerPost; end
+    class CustomEventDataPost < ReservoirSampledContainerPost; end
+    class ErrorEventDataPost < ReservoirSampledContainerPost; end
 
     class ErrorDataPost < AgentPost
 
@@ -381,5 +387,4 @@ module NewRelic
       end
     end
   end
-
 end

@@ -5,6 +5,8 @@
 # These helpers should not have any gem dependencies except on newrelic_rpm
 # itself, and should be usable from within any multiverse suite.
 
+require 'json'
+
 class ArrayLogDevice
   def initialize( array=[] )
     @array = array
@@ -26,10 +28,31 @@ def assert_in_delta(expected, actual, delta)
   assert_between((expected - delta), (expected + delta), actual)
 end
 
-def assert_has_error(error_class)
+def harvest_error_traces!
+  NewRelic::Agent.instance.error_collector.error_trace_aggregator.harvest!
+end
+
+def reset_error_traces!
+  NewRelic::Agent.instance.error_collector.error_trace_aggregator.reset!
+end
+
+def assert_has_traced_error(error_class)
+  errors = harvest_error_traces!
   assert \
-    NewRelic::Agent.instance.error_collector.errors.find {|e| e.exception_class_name == error_class.name} != nil, \
+    errors.find {|e| e.exception_class_name == error_class.name} != nil, \
     "Didn't find error of class #{error_class}"
+end
+
+def last_traced_error
+  harvest_error_traces!.last
+end
+
+def harvest_transaction_events!
+  NewRelic::Agent.instance.transaction_event_aggregator.harvest!
+end
+
+def last_transaction_event
+  harvest_transaction_events!.last.last
 end
 
 unless defined?( assert_block )
@@ -81,7 +104,7 @@ end
 # orderings of the key/value pairs in Hashes that were embedded in the request
 # body). So, this method traverses an object graph and only makes assertions
 # about the terminal (non-Array-or-Hash) nodes therein.
-def assert_audit_log_contains_object(audit_log_contents, o, format)
+def assert_audit_log_contains_object(audit_log_contents, o, format = :json)
   case o
   when Hash
     o.each do |k,v|
@@ -317,12 +340,8 @@ end
 
 def refute_contains_request_params(attributes)
   attributes.keys.each do |key|
-    refute_match /^request\.parameters\./, key.to_s
+    refute_match(/^request\.parameters\./, key.to_s)
   end
-end
-
-def last_traced_error
-  NewRelic::Agent.agent.error_collector.errors.last
 end
 
 def last_transaction_trace
@@ -591,11 +610,11 @@ ensure
 end
 
 def json_dump_and_encode(object)
-  Base64.encode64(NewRelic::JSONWrapper.dump(object))
+  Base64.encode64(::JSON.dump(object))
 end
 
 def get_last_analytics_event
-  NewRelic::Agent.agent.instance_variable_get(:@transaction_event_aggregator).samples.last
+  NewRelic::Agent.agent.transaction_event_aggregator.harvest![1].last
 end
 
 def swap_instance_method(target, method_name, new_method_implementation, &blk)
@@ -613,18 +632,13 @@ def cross_agent_tests_dir
   File.expand_path(File.join(File.dirname(__FILE__), 'fixtures', 'cross_agent_tests'))
 end
 
-def replace_camelcase(contents)
-  { "callCount" => "call_count" }.each_pair do |original, replacement|
-    contents.gsub!(original, replacement)
-  end
-  contents
-end
-
 def load_cross_agent_test(name)
   test_file_path = File.join(cross_agent_tests_dir, "#{name}.json")
   data = File.read(test_file_path)
-  data = replace_camelcase(data)
-  NewRelic::JSONWrapper.load(data)
+  data.gsub!('callCount', 'call_count')
+  data = ::JSON.load(data)
+  data.each { |testcase| testcase['testname'].gsub! ' ', '_' if String === testcase['testname'] }
+  data
 end
 
 def each_cross_agent_test(options)

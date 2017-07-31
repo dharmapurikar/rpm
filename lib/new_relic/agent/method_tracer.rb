@@ -93,65 +93,12 @@ module NewRelic
         end
       end
 
-      # Deprecated: original method preserved for API backward compatibility.
-      # Use either #trace_execution_scoped or #trace_execution_unscoped
-      #
-      # @api public
-      # @deprecated
-      #
-      def trace_method_execution(metric_names, push_scope, produce_metric, deduct_call_time_from_parent, &block) #:nodoc:
-        if push_scope
-          trace_execution_scoped(metric_names, :metric => produce_metric,
-                                 :deduct_call_time_from_parent => deduct_call_time_from_parent, &block)
-        else
-          trace_execution_unscoped(metric_names, &block)
-        end
-      end
-
-      # Deprecated. Use #trace_execution_scoped, a version with an options hash.
-      #
-      # @deprecated
-      #
-      def trace_method_execution_with_scope(metric_names, produce_metric, deduct_call_time_from_parent, scoped_metric_only=false, &block) #:nodoc:
-        trace_execution_scoped(metric_names,
-                               :metric => produce_metric,
-                               :deduct_call_time_from_parent => deduct_call_time_from_parent,
-                               :scoped_metric_only => scoped_metric_only, &block)
-      end
-
-      alias trace_method_execution_no_scope trace_execution_unscoped #:nodoc:
-
-      #
-      # This method is deprecated and exists only for backwards-compatibility
-      # reasons. Usages should be replaced with calls to
-      # NewRelic::Agent.record_metric.
-      #
-      # @api public
-      # @deprecated
-      #
-      def get_stats_scoped(first_name, scoped_metric_only)
-        NewRelic::Agent.instance.stats_engine.get_stats(first_name, true, scoped_metric_only)
-      end
-
-      # This method is deprecated and exists only for backwards-compatibility
-      # reasons. Usages should be replaced with calls to
-      # NewRelic::Agent.record_metric.
-      #
-      # @api public
-      # @deprecated
-      #
-      def get_stats_unscoped(name)
-        NewRelic::Agent.instance.stats_engine.get_stats_no_scope(name)
-      end
-
       # Defines methods used at the class level, for adding instrumentation
       # @api public
       module ClassMethods
         # contains methods refactored out of the #add_method_tracer method
         module AddMethodTracer
-          ALLOWED_KEYS = [:force, :metric, :push_scope, :code_header, :code_footer].freeze
-
-          DEPRECATED_KEYS = [:force, :scoped_metric_only, :deduct_call_time_from_parent].freeze
+          ALLOWED_KEYS = [:metric, :push_scope, :code_header, :code_footer].freeze
 
           # raises an error when the
           # NewRelic::Agent::MethodTracer::ClassMethods#add_method_tracer
@@ -159,16 +106,10 @@ module NewRelic
           # debugging new instrumentation by failing fast
           def check_for_illegal_keys!(method_name, options)
             unrecognized_keys = options.keys - ALLOWED_KEYS
-            deprecated_keys   = options.keys & DEPRECATED_KEYS
 
             if unrecognized_keys.any?
               raise "Unrecognized options when adding method tracer to #{method_name}: " +
                     unrecognized_keys.join(', ')
-            end
-
-            if deprecated_keys.any?
-              NewRelic::Agent.logger.warn("Deprecated options when adding method tracer to #{method_name}: "+
-                deprecated_keys.join(', '))
             end
           end
 
@@ -202,7 +143,7 @@ module NewRelic
           # Example:
           #  Foo.default_metric_name_code('bar') #=> "Custom/#{Foo.name}/bar"
           def default_metric_name_code(method_name)
-            "Custom/#{self.name}/#{method_name.to_s}"
+            "Custom/#{derived_class_name}/#{method_name}"
           end
 
           # Checks to see if the method we are attempting to trace
@@ -210,7 +151,7 @@ module NewRelic
           # anything if the method doesn't exist.
           def newrelic_method_exists?(method_name)
             exists = method_defined?(method_name) || private_method_defined?(method_name)
-            ::NewRelic::Agent.logger.error("Did not trace #{self.name}##{method_name} because that method does not exist") unless exists
+            ::NewRelic::Agent.logger.error("Did not trace #{derived_class_name}##{method_name} because that method does not exist") unless exists
             exists
           end
 
@@ -273,6 +214,23 @@ module NewRelic
               method_with_push_scope(method_name, metric_name_code, options)
             else
               method_without_push_scope(method_name, metric_name_code, options)
+            end
+          end
+
+          private
+
+          def derived_class_name
+            return self.name if self.name && !self.name.empty?
+            return "AnonymousModule" if self.to_s.start_with?("#<Module:")
+
+            # trying to get the "MyClass" portion of "#<Class:MyClass>"
+            name = self.to_s[/^#<Class:(.+)>$/, 1]
+            if name.start_with?("0x")
+              "AnonymousClass"
+            elsif name.start_with?("#<Class:")
+              "AnonymousClass/Class"
+            else
+              "#{name}/Class"
             end
           end
         end
@@ -345,7 +303,7 @@ module NewRelic
           alias_method method_name, _traced_method_name(method_name, metric_name_code)
           send visibility, method_name
           send visibility, _traced_method_name(method_name, metric_name_code)
-          ::NewRelic::Agent.logger.debug("Traced method: class = #{self.name},"+
+          ::NewRelic::Agent.logger.debug("Traced method: class = #{derived_class_name},"+
                     "method = #{method_name}, "+
                     "metric = '#{metric_name_code}'")
         end

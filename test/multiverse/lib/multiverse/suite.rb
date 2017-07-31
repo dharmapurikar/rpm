@@ -11,7 +11,8 @@ require 'base64'
 require 'fileutils'
 require 'digest'
 
-require File.expand_path(File.join(File.dirname(__FILE__), 'environment'))
+require File.expand_path '../../multiverse', __FILE__
+require File.expand_path '../shell_utils', __FILE__
 
 module Multiverse
   class Suite
@@ -19,7 +20,7 @@ module Multiverse
     attr_accessor :directory, :opts
 
     def initialize(directory, opts={})
-      self.directory  = directory
+      self.directory  = File.expand_path directory
       self.opts       = opts
       ENV["VERBOSE"]  = '1' if opts[:verbose]
     end
@@ -62,12 +63,17 @@ module Multiverse
     end
 
     def clean_gemfiles(env_index)
-      FileUtils.rm_rf File.join(directory, "Gemfile.#{env_index}")
-      FileUtils.rm_rf File.join(directory, "Gemfile.#{env_index}.lock")
+      gemfiles = ["Gemfile.#{env_index}", "Gemfile.#{env_index}.lock"]
+      gemfiles.each {|f| File.delete(f) if File.exist?(f)}
     end
 
     def envfile_path
-      File.join(directory, 'Envfile')
+      ep = File.expand_path 'Envfile'
+      if !File.exist?(ep)
+        ep = File.expand_path 'Envfile', directory
+        raise "#{ep} not found" unless File.exist?(ep)
+      end
+      ep
     end
 
     def environments
@@ -111,7 +117,7 @@ module Multiverse
         puts "Waiting on '#{bundling_lock_file}' for our chance to bundle" if verbose?
         f.flock(File::LOCK_EX)
         puts "Let's get ready to BUNDLE!" if verbose?
-        bundler_out = `bundle`
+        bundler_out = ShellUtils.try_command_n_times 'bundle install --retry 3', 3
       end
       bundler_out
     end
@@ -135,14 +141,6 @@ module Multiverse
       "Gemfile.#{suite}.#{env_index}.#{envfile_hash}.lock"
     end
 
-    def cache_gemfile_lock(env_index)
-      filename = cached_gemfile_lock_filename(env_index)
-      dst_path = File.join(bundler_cache_dir, filename)
-      src_path = File.join(directory, "Gemfile.#{env_index}.lock")
-      puts "Caching Gemfile.lock from #{src_path} to #{dst_path}" if verbose?
-      FileUtils.cp(src_path, dst_path)
-    end
-
     def ensure_bundle_cached(env_index)
       cache_dir = bundler_cache_dir
       FileUtils.mkdir_p(cache_dir)
@@ -163,29 +161,26 @@ module Multiverse
       bundler_out = exclusive_bundle
       puts bundler_out if verbose? || $? != 0
       raise "bundle command failed with (#{$?})" unless $? == 0
-      cache_gemfile_lock(env_index) if use_cache?
     end
 
     def generate_gemfile(gemfile_text, env_index, local = true)
+      pin_rack_version_if_needed(gemfile_text)
+
       gemfile = File.join(Dir.pwd, "Gemfile.#{env_index}")
       File.open(gemfile,'w') do |f|
         f.puts '  source "https://rubygems.org"' unless local
         f.print gemfile_text
         f.puts newrelic_gemfile_line unless gemfile_text =~ /^\s*gem .newrelic_rpm./
-        f.puts jruby_openssl_line unless gemfile_text =~ /^\s*gem .jruby-openssl./
+        f.puts jruby_openssl_line unless gemfile_text =~ /^\s*gem .jruby-openssl./ || (defined?(JRUBY_VERSION) && JRUBY_VERSION > '1.7')
         f.puts minitest_line unless gemfile_text =~ /^\s*gem .minitest[^_]./
-
-        rbx_gemfile_lines(f, gemfile_text)
+        f.puts "gem 'rake'" unless gemfile_text =~ /^\s*gem .rake[^_]./ || suite == 'rake'
 
         f.puts "  gem 'mocha', '0.14.0', :require => false"
 
         if debug
-          pry_version = RUBY_VERSION >= '1.8.7' ? '0.10.0' : '0.9.12'
-
-          # Pry 0.10.0 breaks compatibility with Ruby 1.8.7 :(
-          f.puts "  gem 'pry', '~> #{pry_version}'"
-          f.puts "  gem 'pry-byebug'" if RUBY_VERSION >= "2.0.0"
-          f.puts "  gem 'pry-stack_explorer'"
+          f.puts "  gem 'pry', '~> 0.10.0'"
+          f.puts "  gem 'pry-byebug', platforms: :mri"
+          f.puts "  gem 'pry-stack_explorer', platforms: :mri"
         end
       end
       puts yellow("Gemfile.#{env_index} set to:") if verbose?
@@ -199,24 +194,37 @@ module Multiverse
       line
     end
 
-    def rbx_gemfile_lines(f, gemfile_text)
-      return unless is_rbx?
-
-      f.puts "gem 'rubysl', :platforms => [:rbx]" unless gemfile_text =~ /^\s*gem .rubysl./
-      f.puts "gem 'json', :platforms => [:rbx]" unless gemfile_text =~ /^\s*gem .json./
-      f.puts "gem 'racc', :platforms => [:rbx]" unless gemfile_text =~ /^\s*gem .racc./
-    end
-
-    def is_rbx?
-      defined?(RUBY_ENGINE) && RUBY_ENGINE == "rbx"
-    end
-
     def jruby_openssl_line
-      "gem 'jruby-openssl', :require => false, :platforms => [:jruby]"
+      "gem 'jruby-openssl', '~> 0.9.10', :require => false, :platforms => [:jruby]"
     end
 
     def minitest_line
-      "gem 'minitest', '~> 4.7.5', :require => false"
+      "gem 'minitest', '~> #{minitest_version}', :require => false"
+    end
+
+    def minitest_version
+      case
+      when RUBY_VERSION >= '2.4'
+        '5.10.1'
+      else
+        '4.7.5'
+      end
+    end
+
+    def require_minitest
+      require 'minitest'
+    rescue LoadError
+      require 'minitest/unit'
+    end
+
+    # Rack 2.0 works with Ruby > 2.2.2. Earlier rubies need to pin
+    # their Rack version prior to 2.0
+    def pin_rack_version_if_needed gemfile_text
+      return if suite == "rack"
+      rx = /^\s*?gem\s*?('|")rack('|")\s*?$/
+      if gemfile_text =~ rx && RUBY_VERSION < "2.2.2"
+        gemfile_text.gsub! rx, 'gem "rack", "< 2.0.0"'
+      end
     end
 
     def print_environment
@@ -418,7 +426,7 @@ module Multiverse
     end
 
     def configure_child_environment
-      require 'minitest/unit'
+      require_minitest
       patch_minitest_base_for_old_versions
       prevent_minitest_auto_run
       require_mocha
@@ -471,8 +479,8 @@ module Multiverse
 
     def require_helpers
       # If used from a 3rd-party, these paths likely need to be added
-      $LOAD_PATH << File.expand_path(File.join(__FILE__, "..", "..", "..", ".."))
-      $LOAD_PATH << File.expand_path(File.join(__FILE__, "..", "..", "..", "..", "new_relic"))
+      $: << File.expand_path('../../../..', __FILE__)
+      $: << File.expand_path('../../../../new_relic', __FILE__)
       require 'multiverse_helpers'
     end
 

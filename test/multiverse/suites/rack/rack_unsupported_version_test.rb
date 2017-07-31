@@ -2,7 +2,7 @@
 # This file is distributed under New Relic's license terms.
 # See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
 
-if !NewRelic::Agent::Instrumentation::RackHelpers.rack_version_supported?
+if !NewRelic::Agent::Instrumentation::RackHelpers.rack_version_supported? && defined? ::Rack
 
 class RackUnsupportedVersionTest < Minitest::Test
   include MultiverseHelpers
@@ -36,7 +36,7 @@ class RackUnsupportedVersionTest < Minitest::Test
 
   def test_no_instrumentation_when_not_supported
     get '/'
-    assert_metrics_recorded_exclusive([])
+    assert_metrics_recorded_exclusive([], :ignore_filter => /^Supportability/)
   end
 end
 

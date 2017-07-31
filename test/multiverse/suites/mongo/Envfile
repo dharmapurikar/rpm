@@ -1,9 +1,12 @@
-if RUBY_VERSION >= '1.9.3'
-  gemfile <<-RB
-    gem 'mongo', '~>2.0.1'
-    gem 'bson_ext', :platforms => :ruby
-  RB
-end
+gemfile <<-RB
+  gem 'mongo', '~>2.2.0'
+RB
+gemfile <<-RB
+  gem 'mongo', '~>2.1.0'
+RB
+gemfile <<-RB
+  gem 'mongo', '~>2.0.1'
+RB
 
 gemfile <<-RB
   gem 'mongo', '1.10.0'
@@ -67,3 +70,5 @@ end
 after_suite do
   $mongo.stop
 end
+
+# vim: ft=ruby

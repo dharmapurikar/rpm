@@ -5,7 +5,6 @@
 require File.expand_path(File.join(File.dirname(__FILE__),'..', '..',
                                    'test_helper'))
 require 'rack/test'
-require 'new_relic/agent/instrumentation/rack'
 require 'new_relic/rack/browser_monitoring'
 
 ENV['RACK_ENV'] = 'test'
@@ -48,7 +47,6 @@ EOL
 
       [200, {'Content-Type' => 'text/html'}, response]
     end
-    include NewRelic::Agent::Instrumentation::Rack
   end
 
   def app
@@ -104,6 +102,15 @@ EOL
     end
   end
 
+  def test_should_not_inject_javascript_when_transaction_ignored
+    with_config(:'rules.ignore_url_regexes' => ['^/ignore/path']) do
+      get '/ignore/path'
+
+      app.stubs(:should_instrument?).returns(true)
+      app.expects(:autoinstrument_source).never
+    end
+  end
+
   def test_insert_header_should_mark_environment
     get '/'
     assert last_request.env.key?(NewRelic::Rack::BrowserMonitoring::ALREADY_INSTRUMENTED_KEY)
@@ -154,7 +161,7 @@ EOL
 
   def test_with_invalid_us_ascii_encoding
     response = "<html><body>Jürgen</body></html>"
-    response.force_encoding(Encoding.find("US-ASCII")) if RUBY_VERSION >= '1.9'
+    response.force_encoding(Encoding.find("US-ASCII"))
     TestApp.next_response = Rack::Response.new(response)
 
     get '/'

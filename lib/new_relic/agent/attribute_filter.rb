@@ -68,7 +68,6 @@ module NewRelic
       DST_TRANSACTION_TRACER = 1 << 1
       DST_ERROR_COLLECTOR    = 1 << 2
       DST_BROWSER_MONITORING = 1 << 3
-      DST_DEVELOPER_MODE     = 1 << 4
 
       DST_ALL = 0xF
 
@@ -101,6 +100,8 @@ module NewRelic
         build_rule(config[:'transaction_events.attributes.include'], DST_TRANSACTION_EVENTS, true)
         build_rule(config[:'error_collector.attributes.include'],    DST_ERROR_COLLECTOR,    true)
         build_rule(config[:'browser_monitoring.attributes.include'], DST_BROWSER_MONITORING, true)
+        # This agent attribute has unexpected behaviors and we need to ensure it only goes where directed in configuration
+        build_rule(['request_uri'], DST_TRANSACTION_TRACER | DST_ERROR_COLLECTOR, false)
 
         @rules.sort!
 

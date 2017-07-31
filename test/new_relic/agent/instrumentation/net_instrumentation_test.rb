@@ -16,20 +16,25 @@ class NewRelic::Agent::Instrumentation::NetInstrumentationTest < Minitest::Test
       :encoding_key                       => 'gringletoes'
     )
 
+    @response ||= nil
+
     @socket = fixture_tcp_socket( @response )
 
     NewRelic::Agent.instance.stats_engine.clear_stats
   end
 
+  def teardown
+    NewRelic::Agent.shutdown
+  end
+
   def test_scope_stack_integrity_maintained_on_request_failure
     @socket.stubs(:write).raises('fake network error')
     with_config(:"cross_application_tracer.enabled" => true) do
-      state    = NewRelic::Agent::TransactionState.tl_get
-      stack    = state.traced_method_stack
-      expected = stack.push_frame(state, 'dummy')
-      Net::HTTP.get(URI.parse('http://www.google.com/index.html')) rescue nil
-      stack.pop_frame(state, expected, 42, Time.now.to_f)
+      in_transaction "test" do
+        segment = NewRelic::Agent::Transaction.start_segment "dummy"
+        Net::HTTP.get(URI.parse('http://www.google.com/index.html')) rescue nil
+        segment.finish
+      end
     end
   end
-
 end

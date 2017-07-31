@@ -7,7 +7,7 @@ require File.expand_path(File.join(File.dirname(__FILE__), '..', '..', '..','tes
 class NewRelic::Agent::StatsHashTest < Minitest::Test
   def setup
     @hash = NewRelic::Agent::StatsHash.new
-    NewRelic::Agent.instance.error_collector.errors.clear
+    reset_error_traces!
   end
 
   def test_creates_default_entries
@@ -136,23 +136,29 @@ class NewRelic::Agent::StatsHashTest < Minitest::Test
     txn_metrics = NewRelic::Agent::TransactionMetrics.new
     txn_metrics.record_unscoped(specs[0].name, 1)
     txn_metrics.record_unscoped(specs[1].name, 2)
-    txn_metrics.record_scoped(specs[3].name, 3)
+    txn_metrics.record_scoped_and_unscoped(specs[3].name, 3)
 
     hash.merge_transaction_metrics!(txn_metrics, 'a_scope')
 
     assert_equal(4, hash.to_h.keys.size)
     assert_equal(2, hash[specs[0]].call_count)
     assert_equal(2, hash[specs[1]].call_count)
-    assert_equal(1, hash[specs[2]].call_count)
+    assert_equal(2, hash[specs[2]].call_count)
     assert_equal(1, hash[specs[3]].call_count)
   end
 
-  def test_marshal_dump
-    @hash.record(NewRelic::MetricSpec.new('foo'), 1)
-    @hash.record(NewRelic::MetricSpec.new('bar'), 2)
-    copy = Marshal.load(Marshal.dump(@hash))
-    assert_equal(@hash, copy)
-    assert_equal(@hash.started_at, copy.started_at)
+  # Marshal.load is broken on current versions of Jruby, but it has been reported
+  # and will be fixed in JRuby 9.1.9.0. This conditional be removed after it's
+  # released. See: https://github.com/jruby/jruby/issues/4526.
+  if RUBY_ENGINE == 'ruby' || RUBY_ENGINE == 'jruby' && JRUBY_VERSION >= "9.1.9.0"
+    def test_marshal_dump
+      @hash.record(NewRelic::MetricSpec.new('foo'), 1)
+      @hash.record(NewRelic::MetricSpec.new('bar'), 2)
+
+      copy = Marshal.load(Marshal.dump(@hash))
+      assert_equal(@hash, copy)
+      assert_equal(@hash.started_at, copy.started_at)
+    end
   end
 
   # We can only fix up the default proc on Rubies that let us set it
@@ -170,17 +176,18 @@ class NewRelic::Agent::StatsHashTest < Minitest::Test
 
       @hash.record(DEFAULT_SPEC, 1)
 
-      assert_has_error NewRelic::Agent::StatsHash::StatsHashLookupError
+      assert_has_traced_error NewRelic::Agent::StatsHash::StatsHashLookupError
     end
 
     def test_borked_default_proc_heals_thyself
       fake_borked_default_proc(@hash)
 
       @hash.record(DEFAULT_SPEC, 1)
-      NewRelic::Agent.instance.error_collector.errors.clear
+      reset_error_traces!
 
       @hash.record(NewRelic::MetricSpec.new('something/else/entirely'), 1)
-      assert_equal 0, NewRelic::Agent.instance.error_collector.errors.size
+      errors = harvest_error_traces!
+      assert_equal 0, errors.size
     end
   end
 

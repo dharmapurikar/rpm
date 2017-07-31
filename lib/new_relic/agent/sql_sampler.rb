@@ -140,7 +140,7 @@ module NewRelic
       # @api public
       # @deprecated Use {Datastores.notice_sql} instead.
       #
-      def notice_sql(sql, metric_name, config, duration, state=nil, explainer=nil) #THREAD_LOCAL_ACCESS sometimes
+      def notice_sql(sql, metric_name, config, duration, state=nil, explainer=nil, binds=nil, name=nil) #THREAD_LOCAL_ACCESS sometimes
         state ||= TransactionState.tl_get
         data = state.sql_sampler_transaction_data
         return unless data
@@ -148,9 +148,21 @@ module NewRelic
         if state.is_sql_recorded?
           if duration > Agent.config[:'slow_sql.explain_threshold']
             backtrace = caller.join("\n")
-            data.sql_data << SlowSql.new(Database.capture_query(sql),
-                                         metric_name, config,
-                                         duration, backtrace, explainer)
+            statement = Database::Statement.new(sql, config, explainer, binds, name)
+            data.sql_data << SlowSql.new(statement, metric_name, duration, backtrace)
+          end
+        end
+      end
+
+      def notice_sql_statement(statement, metric_name, duration)
+        state ||= TransactionState.tl_get
+        data = state.sql_sampler_transaction_data
+        return unless data
+
+        if state.is_sql_recorded?
+          if duration > Agent.config[:'slow_sql.explain_threshold']
+            backtrace = caller.join("\n")
+            data.sql_data << SlowSql.new(statement, metric_name, duration, backtrace)
           end
         end
       end
@@ -208,38 +220,54 @@ module NewRelic
     end
 
     class SlowSql
-      attr_reader :sql
+      attr_reader :statement
       attr_reader :metric_name
       attr_reader :duration
       attr_reader :backtrace
 
-      def initialize(sql, metric_name, config, duration, backtrace=nil, explainer=nil)
-        @sql = sql
+      def initialize(statement, metric_name, duration, backtrace=nil)
+        @statement = statement
         @metric_name = metric_name
-        @config = config
         @duration = duration
         @backtrace = backtrace
-        @explainer = explainer
+      end
+
+      def sql
+        statement.sql
+      end
+
+      def base_params
+        params = {}
+
+        if NewRelic::Agent.config[:'datastore_tracer.instance_reporting.enabled']
+          params[:host] = statement.host if statement.host
+          params[:port_path_or_id] = statement.port_path_or_id if statement.port_path_or_id
+        end
+        if NewRelic::Agent.config[:'datastore_tracer.database_name_reporting.enabled'] && statement.database_name
+          params[:database_name] = statement.database_name
+        end
+
+        params
       end
 
       def obfuscate
-        NewRelic::Agent::Database.obfuscate_sql(@sql)
+        NewRelic::Agent::Database.obfuscate_sql(statement)
       end
 
       def normalize
         NewRelic::Agent::Database::Obfuscator.instance \
-          .default_sql_obfuscator(@sql).gsub(/\?\s*\,\s*/, '').gsub(/\s/, '')
+          .default_sql_obfuscator(statement).gsub(/\?\s*\,\s*/, '').gsub(/\s/, '')
       end
 
       def explain
-        if @config && @explainer
-          NewRelic::Agent::Database.explain_sql(@sql, @config, @explainer)
+        if statement.config && statement.explainer
+          NewRelic::Agent::Database.explain_sql(statement)
         end
       end
 
       # We can't serialize the explainer, so clear it before we transmit
       def prepare_to_send
-        @explainer = nil
+        statement.explainer = nil
       end
     end
 
@@ -254,7 +282,7 @@ module NewRelic
 
       def initialize(normalized_query, slow_sql, path, uri)
         super()
-        @params = {}
+        @params = slow_sql.base_params
         @sql_id = consistent_hash(normalized_query)
         set_primary slow_sql, path, uri
         record_data_point(float(slow_sql.duration))
@@ -312,10 +340,14 @@ module NewRelic
 
       private
 
+      # need to hash the same way in every process, to be able to aggregate slow SQL traces
       def consistent_hash(string)
-        # need to hash the same way in every process
-        Digest::MD5.hexdigest(string).hex \
-          .modulo(2**31-1)  # ensure sql_id fits in an INT(11)
+        if NewRelic::Agent.config[:'slow_sql.use_longer_sql_id']
+          Digest::MD5.hexdigest(string).hex.modulo(2**63-1)
+        else
+          # from when sql_id needed to fit in an INT(11)
+          Digest::MD5.hexdigest(string).hex.modulo(2**31-1)
+        end
       end
     end
   end

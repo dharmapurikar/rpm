@@ -48,16 +48,16 @@ class ErrorController < ApplicationController
 
   def string_noticed_error
     NewRelic::Agent.notice_error("trilobites died out millions of years ago")
-    render :text => 'trilobites'
+    render body: 'trilobites'
   end
 
   def noticed_error
-    newrelic_notice_error(RuntimeError.new('this error should be noticed'))
-    render :text => "Shoulda noticed an error"
+    NewRelic::Agent.notice_error(RuntimeError.new('this error should be noticed'))
+    render body: "Shoulda noticed an error"
   end
 
   def middleware_error
-    render :text => 'everything went great'
+    render body: 'everything went great'
   end
 
   def error_with_custom_params
@@ -65,12 +65,18 @@ class ErrorController < ApplicationController
     raise 'bad things'
   end
 
-  if Rails::VERSION::MAJOR == 2
-    filter_parameter_logging(:secret)
+  def noticed_error_with_trace_only
+    NewRelic::Agent.notice_error("Raise the gates!", :trace_only => true)
+    render body: 'Runner 5'
+  end
+
+  def noticed_error_with_expected_error
+    NewRelic::Agent.notice_error("Raise the gates!", :expected => true)
+    render body: 'Runner 5'
   end
 end
 
-class ErrorsWithoutSSCTest < RailsMultiverseTest
+class ErrorsWithoutSSCTest < ActionDispatch::IntegrationTest
   extend Multiverse::Color
 
   include MultiverseHelpers
@@ -86,51 +92,49 @@ class ErrorsWithoutSSCTest < RailsMultiverseTest
   end
 
   def last_error
-    @error_collector.errors.last
+    errors.last
   end
 
-  if Rails::VERSION::MAJOR >= 3
-    def test_error_collector_should_be_enabled
-      assert NewRelic::Agent.config[:agent_enabled]
-      assert NewRelic::Agent.config[:'error_collector.enabled']
-      assert @error_collector.enabled?
-    end
+  def test_error_collector_should_be_enabled
+    assert NewRelic::Agent.config[:agent_enabled]
+    assert NewRelic::Agent.config[:'error_collector.enabled']
+    assert @error_collector.enabled?
+  end
 
-    def test_should_capture_routing_error
-      get '/bad_route'
-      assert_error_reported_once('this is an uncaught routing error', nil, nil)
-    end
+  def test_should_capture_routing_error
+    get '/bad_route'
+    assert_error_reported_once('this is an uncaught routing error', nil, nil)
+  end
 
-    def test_should_capture_errors_raised_in_middleware_before_call
-      get '/error/middleware_error/before'
-      assert_error_reported_once('middleware error', nil, nil)
-    end
+  def test_should_capture_errors_raised_in_middleware_before_call
+    get '/error/middleware_error/before'
+    assert_error_reported_once('middleware error', nil, nil)
+  end
 
-    def test_should_capture_errors_raised_in_middleware_after_call
-      get '/error/middleware_error/after'
-      assert_error_reported_once('middleware error', nil, nil)
-    end
+  def test_should_capture_errors_raised_in_middleware_after_call
+    get '/error/middleware_error/after'
+    assert_error_reported_once('middleware error', nil, nil)
+  end
 
-    def test_should_capture_request_uri_and_params
-      get '/error/controller_error?eat=static'
-      assert_equal('/error/controller_error', attributes_for_single_error_posted("request_uri"))
+  def test_should_capture_request_uri_and_params
+    get '/error/controller_error?eat=static'
+    assert_equal('/error/controller_error', attributes_for_single_error_posted("request_uri"))
 
-      expected_params = {
-        'request.parameters.eat' => 'static',
-        'httpResponseCode' => '500'
-      }
+    expected_params = {
+      'request.parameters.eat' => 'static',
+      'httpResponseCode' => '500'
+    }
 
-      attributes = agent_attributes_for_single_error_posted
-      expected_params.each do |key, value|
-        assert_equal value, attributes[key]
-      end
+    attributes = agent_attributes_for_single_error_posted
+    expected_params.each do |key, value|
+      assert_equal value, attributes[key]
     end
   end
 
   def test_should_capture_error_raised_in_view
     get '/error/view_error'
-    assert_error_reported_once('this is an uncaught view error',
-                               'Controller/error/view_error')
+    assert_equal 1, errors.size
+    assert_includes ['this is an uncaught view error', 'ActionView::Template::Error'], errors[0].message
   end
 
   def test_should_capture_error_raised_in_controller
@@ -196,13 +200,13 @@ class ErrorsWithoutSSCTest < RailsMultiverseTest
 
   def test_should_not_notice_errors_from_ignored_action
     get '/error/ignored_action'
-    assert(@error_collector.errors.empty?,
+    assert(errors.empty?,
            'Noticed an error that should have been ignored')
   end
 
   def test_should_not_notice_ignored_error_classes
     get '/error/ignored_error'
-    assert(@error_collector.errors.empty?,
+    assert(errors.empty?,
            'Noticed an error that should have been ignored')
   end
 
@@ -223,7 +227,7 @@ class ErrorsWithoutSSCTest < RailsMultiverseTest
       get '/error/controller_error'
     end
 
-    assert(NewRelic::Agent.instance.error_collector.errors.empty?,
+    assert(errors.empty?,
            'Noticed an error that should have been ignored')
   end
 
@@ -272,10 +276,40 @@ class ErrorsWithoutSSCTest < RailsMultiverseTest
     end
   end
 
+  def test_should_not_increment_metrics_on_expected_error_errors
+    get '/error/noticed_error_with_expected_error'
+
+    assert_equal(1, errors.size,
+                 'Error with :expected should have been recorded')
+
+    assert_metrics_not_recorded([
+      'Errors/all',
+      'Errors/Controller/error/noticed_error_with_expected_error'
+    ])
+
+    assert_metrics_recorded("Apdex" => { :apdex_s => 1 })
+  end
+
+  def test_should_permit_trace_only_option
+    get '/error/noticed_error_with_trace_only'
+
+    assert_equal(1, errors.size, 'Error with :trace_error should have been recorded')
+    assert_metrics_not_recorded([
+      'Errors/all',
+      'Errors/Controller/error/noticed_error_with_trace_only'
+    ])
+
+    assert_metrics_recorded("Apdex" => { :apdex_s => 1 })
+  end
+
   protected
 
+  def errors
+    @error_collector.error_trace_aggregator.instance_variable_get :@errors
+  end
+
   def errors_with_message(message)
-    @error_collector.errors.select{|error| error.message == message}
+    errors.select{|error| error.message == message}
   end
 
   def assert_errors_reported(message, queued_count, total_count=queued_count, txn_name=nil, apdex_f=1)
@@ -315,8 +349,9 @@ class ErrorsWithSSCTest < ErrorsWithoutSSCTest
 
   def test_should_ignore_server_ignored_errors
     get '/error/server_ignored_error'
-    assert(@error_collector.errors.empty?,
-           'Noticed an error that should have been ignored' + @error_collector.errors.join(', '))
+
+    assert(errors.empty?,
+           'Noticed an error that should have been ignored' + errors.join(', '))
   end
 
 end

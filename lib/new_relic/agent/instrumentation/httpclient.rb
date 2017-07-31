@@ -12,8 +12,8 @@ DependencyDetection.defer do
   end
 
   depends_on do
-    minimum_supported_version = NewRelic::VersionNumber.new(HTTPCLIENT_MIN_VERSION)
-    current_version = NewRelic::VersionNumber.new(HTTPClient::VERSION)
+    minimum_supported_version = Gem::Version.new(HTTPCLIENT_MIN_VERSION)
+    current_version = Gem::Version.new(HTTPClient::VERSION)
 
     current_version >= minimum_supported_version
   end
@@ -28,15 +28,24 @@ DependencyDetection.defer do
     class HTTPClient
       def do_get_block_with_newrelic(req, proxy, conn, &block)
         wrapped_request = NewRelic::Agent::HTTPClients::HTTPClientRequest.new(req)
+        segment = NewRelic::Agent::Transaction.start_external_request_segment(
+            wrapped_request.type, wrapped_request.uri, wrapped_request.method)
 
-        response = nil
-        ::NewRelic::Agent::CrossAppTracing.tl_trace_http_request(wrapped_request) do
+        begin
+          response = nil
+          segment.add_request_headers wrapped_request
+
           do_get_block_without_newrelic(req, proxy, conn, &block)
           response = conn.pop
           conn.push response
-          ::NewRelic::Agent::HTTPClients::HTTPClientResponse.new(response)
+
+          wrapped_response = ::NewRelic::Agent::HTTPClients::HTTPClientResponse.new(response)
+          segment.read_response_headers wrapped_response
+
+          response
+        ensure
+          segment.finish
         end
-        response
       end
 
       alias do_get_block_without_newrelic do_get_block

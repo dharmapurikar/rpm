@@ -14,8 +14,6 @@ module NewRelic
 
         EMPTY_HASH = {}.freeze
 
-        CAN_BYTESLICE = String.instance_methods.include?(:byteslice)
-
         def initialize(filter)
           @filter = filter
 
@@ -25,6 +23,7 @@ module NewRelic
 
           @custom_destinations = {}
           @agent_destinations = {}
+          @already_warned_count_limit = nil
         end
 
         def add_agent_attribute(key, value, default_destinations)
@@ -110,7 +109,7 @@ module NewRelic
         end
 
         def add(attributes, key, value)
-          return unless value
+          return if value.nil?
 
           if exceeds_bytesize_limit?(value, VALUE_LIMIT)
             value = slice(value)
@@ -122,8 +121,6 @@ module NewRelic
         def for_destination(attributes, calculated_destinations, destination)
           # Avoid allocating anything if there are no attrs at all
           return EMPTY_HASH if attributes.empty?
-
-          return attributes.dup if destination == NewRelic::Agent::AttributeFilter::DST_DEVELOPER_MODE
 
           attributes.inject({}) do |memo, (key, value)|
             if @filter.allows?(calculated_destinations[key], destination)
@@ -147,15 +144,8 @@ module NewRelic
         # the end. It'll either remove the one-character-too-many we have, or
         # peel off the partial, mangled character left by the byteslice.
         def slice(incoming)
-          if CAN_BYTESLICE
-            result = incoming.to_s.byteslice(0, VALUE_LIMIT + 1)
-          else
-            # < 1.9.3 doesn't have byteslice, so we take off bytes instead.
-            result = incoming.to_s.bytes.take(VALUE_LIMIT + 1).pack("C*")
-          end
-
+          result = incoming.to_s.byteslice(0, VALUE_LIMIT + 1)
           result.chop!
-          result
         end
       end
     end

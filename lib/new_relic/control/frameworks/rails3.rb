@@ -3,7 +3,6 @@
 # See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
 
 require 'new_relic/control/frameworks/rails'
-require 'new_relic/rack/error_collector'
 
 module NewRelic
   class Control
@@ -16,7 +15,7 @@ module NewRelic
       class Rails3 < NewRelic::Control::Frameworks::Rails
 
         def env
-          @env ||= ::Rails.env.to_s
+          @env ||= ( ENV['NEW_RELIC_ENV'] || ::Rails.env.to_s )
         end
 
         def rails_root
@@ -28,7 +27,7 @@ module NewRelic
         end
 
         def version
-          @rails_version ||= NewRelic::VersionNumber.new(::Rails::VERSION::STRING)
+          @rails_version ||= Gem::Version.new(::Rails::VERSION::STRING)
         end
 
         protected

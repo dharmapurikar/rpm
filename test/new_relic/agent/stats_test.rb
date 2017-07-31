@@ -148,38 +148,16 @@ class NewRelic::Agent::StatsTest < Minitest::Test
     assert_equal(s3.sum_of_squares, 4*4 + 7*7 + 13*13 + 16*16, "check sum of squares")
   end
 
-  def test_chained_stats_proxies_calls_to_scoped_and_unscoped
-    scoped_stats = NewRelic::Agent::Stats.new
-    unscoped_stats = NewRelic::Agent::Stats.new
-    chained_stats = NewRelic::Agent::ChainedStats.new(scoped_stats, unscoped_stats)
-    chained_stats.record_data_point(42)
-    assert_equal(1, scoped_stats.call_count)
-    assert_equal(1, unscoped_stats.call_count)
-    assert_equal(42, scoped_stats.total_call_time)
-    assert_equal(42, unscoped_stats.total_call_time)
-  end
+  def test_to_json_enforces_float_values
+    s1 = NewRelic::Agent::Stats.new
+    s1.trace_call 3.to_r
+    s1.trace_call 7.to_r
 
-  def test_chained_stats_returns_values_from_scoped
-    scoped_stats = NewRelic::Agent::Stats.new
-    unscoped_stats = NewRelic::Agent::Stats.new
-    chained_stats = NewRelic::Agent::ChainedStats.new(scoped_stats, unscoped_stats)
-    scoped_stats.record_data_point(42)
-    assert_equal(1, chained_stats.call_count)
-    assert_equal(42, chained_stats.total_call_time)
-  end
-
-  if RUBY_VERSION >= '1.9'
-    def test_to_json_enforces_float_values
-      s1 = NewRelic::Agent::Stats.new
-      s1.trace_call 3.to_r
-      s1.trace_call 7.to_r
-
-      assert_equal 3.0, JSON.load(s1.to_json)['min_call_time']
-    end
+    assert_equal 3.0, JSON.load(s1.to_json)['min_call_time']
   end
 
   private
-  def validate (stats, count, total, min, max, exclusive = nil)
+  def validate(stats, count, total, min, max, exclusive = nil)
     assert_equal count, stats.call_count
     assert_equal total, stats.total_call_time
     assert_equal min,   stats.min_call_time

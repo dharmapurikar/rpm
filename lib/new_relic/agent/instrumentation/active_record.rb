@@ -6,19 +6,19 @@ module NewRelic
   module Agent
     module Instrumentation
       module ActiveRecord
-        EXPLAINER = lambda do |config, query|
-          connection = NewRelic::Agent::Database.get_connection(config) do
-            ::ActiveRecord::Base.send("#{config[:adapter]}_connection",
-                                      config)
+        EXPLAINER = lambda do |statement|
+          connection = NewRelic::Agent::Database.get_connection(statement.config) do
+            ::ActiveRecord::Base.send("#{statement.config[:adapter]}_connection",
+                                      statement.config)
           end
           if connection && connection.respond_to?(:execute)
-            return connection.execute("EXPLAIN #{query}")
+            return connection.execute("EXPLAIN #{statement.sql}")
           end
         end
 
         def self.insert_instrumentation
           if defined?(::ActiveRecord::VERSION::MAJOR) && ::ActiveRecord::VERSION::MAJOR.to_i >= 3
-            ::NewRelic::Agent::Instrumentation::ActiveRecordHelper.instrument_writer_methods
+            ::NewRelic::Agent::Instrumentation::ActiveRecordHelper.instrument_additional_methods
           end
 
           ::ActiveRecord::ConnectionAdapters::AbstractAdapter.module_eval do
@@ -44,29 +44,29 @@ module NewRelic
           end
 
           sql, name, _ = args
-          metrics = ActiveRecordHelper.metrics_for(
+
+          product, operation, collection = ActiveRecordHelper.product_operation_collection_for(
             NewRelic::Helper.correctly_encoded(name),
             NewRelic::Helper.correctly_encoded(sql),
             @config && @config[:adapter])
 
-          # It is critical that we grab this name before trace_execution_scoped
-          # because that method mutates the metrics list passed in.
-          scoped_metric = metrics.first
+          host = nil
+          port_path_or_id = nil
+          database = nil
 
-          NewRelic::Agent::MethodTracer.trace_execution_scoped(metrics) do
-            t0 = Time.now
-            begin
-              log_without_newrelic_instrumentation(*args, &block)
-            ensure
-              elapsed_time = (Time.now - t0).to_f
+          if ActiveRecordHelper::InstanceIdentification.supported_adapter?(@config)
+            host = ActiveRecordHelper::InstanceIdentification.host(@config)
+            port_path_or_id = ActiveRecordHelper::InstanceIdentification.port_path_or_id(@config)
+            database = @config && @config[:database]
+          end
 
-              NewRelic::Agent.instance.transaction_sampler.notice_sql(sql,
-                                                    @config, elapsed_time,
-                                                    state, EXPLAINER)
-              NewRelic::Agent.instance.sql_sampler.notice_sql(sql, scoped_metric,
-                                                    @config, elapsed_time,
-                                                    state, EXPLAINER)
-            end
+          segment = NewRelic::Agent::Transaction.start_datastore_segment(product, operation, collection, host, port_path_or_id, database)
+          segment._notice_sql(sql, @config, EXPLAINER)
+
+          begin
+            log_without_newrelic_instrumentation(*args, &block)
+          ensure
+            segment.finish
           end
         end
       end

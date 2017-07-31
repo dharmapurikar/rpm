@@ -2,8 +2,8 @@
 # This file is distributed under New Relic's license terms.
 # See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
 
-require File.expand_path(File.join(File.dirname(__FILE__),'..','..','test_helper'))
-require 'test/new_relic/agent/event_buffer_test_cases'
+require File.expand_path '../../../test_helper', __FILE__
+require 'new_relic/agent/event_buffer_test_cases'
 
 module NewRelic::Agent
   class SampledBufferTest < Minitest::Test
@@ -101,6 +101,42 @@ module NewRelic::Agent
       30.times { buffer << 'x' }
       buffer.reset!
       assert_equal(0.5, buffer.sample_rate_lifetime)
+    end
+
+    def test_append_with_block
+      buffer = buffer_class.new(5)
+      5.times do |i|
+        buffer.append { i }
+      end
+
+      assert_equal [0, 1, 2, 3, 4], buffer.to_a
+    end
+
+    def test_append_with_block_while_sampling
+      buffer = buffer_class.new(5)
+      buffer.stubs(:rand).returns(0)
+
+      10.times do |i|
+        buffer.append { i }
+      end
+
+      assert_equal [9, 1, 2, 3, 4], buffer.to_a
+    end
+
+    def test_append_with_block_increments_seen
+      buffer = buffer_class.new(5)
+      10.times do |i|
+        buffer.append { i }
+      end
+
+      assert_equal 10, buffer.num_seen
+    end
+
+    def test_append_does_not_allow_an_argument_and_block
+      assert_raises ArgumentError do
+        buffer = buffer_class.new 5
+        buffer.append(4) { 5 }
+      end
     end
   end
 end

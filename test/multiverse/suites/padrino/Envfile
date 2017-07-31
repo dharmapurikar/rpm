@@ -1,7 +1,19 @@
-gemfile <<-RB
-  # Gemspec from rubygems on this version gets illformed warnings on 1.8.7
-  gem 'http_router', '0.11.0', :git => 'git://github.com/joshbuddy/http_router.git', :tag => 'v0.11.0'
+if RUBY_VERSION >= '2.2.0'
+  gemfile <<-RB
+    gem 'activesupport', '~> 3'
+    gem 'padrino', '~> 0.14.0'
+    gem 'rack-test', :require => 'rack/test'
+  RB
+end
 
+gemfile <<-RB
+  gem 'activesupport', '~> 3'
+  gem 'padrino', '~> 0.13.0'
+  gem 'sinatra', '< 2' # there is an incompatibility between padrino 0.13.3.3 and Sinatra 2.0
+  gem 'rack-test', :require => 'rack/test'
+RB
+
+gemfile <<-RB
   gem 'activesupport', '~> 3'
   gem 'padrino', '~> 0.11.0'
   gem 'rack-test', :require => 'rack/test'
@@ -12,3 +24,5 @@ gemfile <<-RB
   gem 'padrino', '~> 0.10.0'
   gem 'rack-test', :require => 'rack/test'
 RB
+
+# vim: ft=ruby

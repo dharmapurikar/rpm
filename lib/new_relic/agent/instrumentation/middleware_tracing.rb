@@ -26,7 +26,7 @@ module NewRelic
   module Agent
     module Instrumentation
       module MiddlewareTracing
-        TXN_STARTED_KEY = 'newrelic.transaction_started'.freeze unless defined?(TXN_STARTED_KEY)
+        TXN_STARTED_KEY = 'newrelic.transaction_started'.freeze
 
         def _nr_has_middleware_tracing
           true
@@ -39,10 +39,11 @@ module NewRelic
         end
 
         def merge_first_middleware_options(opts, env)
-          opts.merge(
-            :request          => ::Rack::Request.new(env),
-            :apdex_start_time => QueueTime.parse_frontend_timestamp(env)
-          )
+          opts[:apdex_start_time] = QueueTime.parse_frontend_timestamp(env)
+          # this case is for the rare occasion that an app is using Puma::Rack
+          # without having ::Rack as a dependency
+          opts[:request] = ::Rack::Request.new(env) if defined? ::Rack
+          opts
         end
 
         def note_transaction_started(env)
@@ -53,6 +54,30 @@ module NewRelic
           if result.is_a?(Array) && state.current_transaction
             state.current_transaction.http_response_code = result[0]
           end
+        end
+
+        CONTENT_TYPE = 'Content-Type'.freeze
+
+        def capture_response_content_type(state, result)
+          if result.is_a?(Array) && state.current_transaction
+            _, headers, _ = result
+            state.current_transaction.response_content_type = headers[CONTENT_TYPE]
+          end
+        end
+
+        CONTENT_LENGTH = 'Content-Length'.freeze
+
+        def capture_response_content_length(state, result)
+          if result.is_a?(Array) && state.current_transaction
+            _, headers, _ = result
+            state.current_transaction.response_content_length = headers[CONTENT_LENGTH]
+          end
+        end
+
+        def capture_response_attributes(state, result)
+          capture_http_response_code(state, result)
+          capture_response_content_type(state, result)
+          capture_response_content_length(state, result)
         end
 
         def call(env)
@@ -66,8 +91,10 @@ module NewRelic
 
             result = (target == self) ? traced_call(env) : target.call(env)
 
-            capture_http_response_code(state, result)
-            events.notify(:after_call, env, result) if first_middleware
+            if first_middleware
+              capture_response_attributes(state, result)
+              events.notify(:after_call, env, result)
+            end
 
             result
           rescue Exception => e

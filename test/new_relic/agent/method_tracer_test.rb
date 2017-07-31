@@ -57,11 +57,21 @@ module TestModuleWithLog
   add_method_tracer :other_method, 'Custom/foo/bar'
 end
 
+class MyClass
+  def self.class_method
+  end
+
+  class << self
+    include NewRelic::Agent::MethodTracer
+    add_method_tracer :class_method
+  end
+end
+
 class NewRelic::Agent::MethodTracerTest < Minitest::Test
   attr_reader :stats_engine
 
   def setup
-    NewRelic::Agent::TransactionState.tl_clear_for_testing
+    NewRelic::Agent::TransactionState.tl_clear
 
     NewRelic::Agent.manual_start
     @stats_engine = NewRelic::Agent.instance.stats_engine
@@ -69,6 +79,7 @@ class NewRelic::Agent::MethodTracerTest < Minitest::Test
     @scope_listener = NewRelic::Agent::MockScopeListener.new
     @old_sampler = NewRelic::Agent.instance.transaction_sampler
     NewRelic::Agent.instance.stubs(:transaction_sampler).returns(@scope_listener)
+    @metric_name ||= nil
 
     freeze_time
 
@@ -84,6 +95,7 @@ class NewRelic::Agent::MethodTracerTest < Minitest::Test
     end
 
     @metric_name = nil
+    NewRelic::Agent.shutdown
     super
   end
 
@@ -91,23 +103,16 @@ class NewRelic::Agent::MethodTracerTest < Minitest::Test
     assert_equal '12345', TestModuleWithLog.other_method
   end
 
-  def test_record_metrics_does_not_raise_outside_transaction
-    state = NewRelic::Agent::TransactionState.tl_get
-    NewRelic::Agent::MethodTracerHelpers.record_metrics(state, 'a', ['b'], 12, 10, :metric => true)
-
-    expected = { :call_count => 1, :total_call_time => 12, :total_exclusive_time => 10 }
-    assert_metrics_recorded('a' => expected, 'b' => expected)
-  end
-
   def test_trace_execution_scoped_records_metric_data
     metric = "hello"
-    self.class.trace_execution_scoped(metric) do
-      advance_time 0.05
+
+    in_transaction do
+      self.class.trace_execution_scoped(metric) do
+        advance_time 0.05
+      end
     end
 
-    stats = @stats_engine.get_stats(metric)
-    check_time 0.05, stats.total_call_time
-    assert_equal 1, stats.call_count
+    assert_metrics_recorded metric => {:call_count => 1, :total_call_time => 0.05}
   end
 
   def test_trace_execution_scoped_with_no_metrics_skips_out
@@ -118,46 +123,24 @@ class NewRelic::Agent::MethodTracerTest < Minitest::Test
     assert_metrics_recorded_exclusive([])
   end
 
-  def test_trace_execution_scoped_records_metric_data_from_callback
-    metric = "hello"
-    callback_metric = "goodbye"
-    callback = Proc.new { callback_metric }
-    options = { :additional_metrics_callback => callback }
-
-    self.class.trace_execution_scoped(metric, options) do
-      advance_time 0.05
-    end
-
-    stats = @stats_engine.get_stats(callback_metric)
-    check_time 0.05, stats.total_call_time
-    assert_equal 1, stats.call_count
-  end
-
   def test_trace_execution_scoped_pushes_transaction_scope
-    self.class.trace_execution_scoped('yeap') do
-      'ptoo'
+    in_transaction do
+      self.class.trace_execution_scoped('yeap') do
+        'ptoo'
+      end
+      assert_equal 'yeap',  @scope_listener.scopes.last
     end
-    assert_equal 'yeap',  @scope_listener.scopes.last
-  end
-
-  def test_basic__original_api
-    metric = "hello"
-    self.class.trace_method_execution(metric, true, true, true) do
-      advance_time(0.05)
-    end
-
-    stats = @stats_engine.get_stats(metric)
-    check_time 0.05, stats.total_call_time
-    assert_equal 1, stats.call_count
-    assert_equal metric,  @scope_listener.scopes.last
   end
 
   METRIC = "metric"
   def test_add_method_tracer
     @metric_name = METRIC
     self.class.add_method_tracer :method_to_be_traced, METRIC
+    in_transaction do
+      method_to_be_traced 1,2,3,true,METRIC
 
-    method_to_be_traced 1,2,3,true,METRIC
+      assert_equal METRIC, @scope_listener.scopes.last
+    end
 
     begin
       self.class.remove_method_tracer :method_to_be_traced, METRIC
@@ -165,20 +148,42 @@ class NewRelic::Agent::MethodTracerTest < Minitest::Test
       # ignore 'no tracer' errors from remove method tracer
     end
 
-
-    stats = @stats_engine.get_stats(METRIC)
-    check_time 0.05, stats.total_call_time
-    assert_equal 1, stats.call_count
-    assert_equal METRIC, @scope_listener.scopes.last
+    assert_metrics_recorded METRIC => {:call_count => 1, :total_call_time => 0.05}
   end
 
   def test_add_method_tracer__default
     self.class.add_method_tracer :simple_method
 
-    simple_method
+    in_transaction do
+      simple_method
+    end
 
-    stats = @stats_engine.get_stats("Custom/#{self.class.name}/simple_method")
-    assert stats.call_count == 1
+    metric = "Custom/#{self.class.name}/simple_method"
+    assert_metrics_recorded metric => {:call_count => 1}
+  end
+
+  def test_add_class_method_tracer
+    in_transaction do
+      MyClass.class_method
+    end
+
+    metric = "Custom/MyClass/Class/class_method"
+    assert_metrics_recorded metric => {:call_count => 1}
+  end
+
+  def test_add_anonymous_class_method_tracer
+    cls = Class.new do
+      def instance_method; end
+      include NewRelic::Agent::MethodTracer
+      add_method_tracer :instance_method
+    end
+
+    in_transaction do
+      cls.new.instance_method
+    end
+
+    metric = "Custom/AnonymousClass/instance_method"
+    assert_metrics_recorded metric => {:call_count => 1}
   end
 
   def test_add_method_tracer__reentry
@@ -186,10 +191,12 @@ class NewRelic::Agent::MethodTracerTest < Minitest::Test
     self.class.add_method_tracer :simple_method
     self.class.add_method_tracer :simple_method
 
-    simple_method
+    in_transaction do
+      simple_method
+    end
 
-    stats = @stats_engine.get_stats("Custom/#{self.class.name}/simple_method")
-    assert stats.call_count == 1
+    metric = "Custom/#{self.class.name}/simple_method"
+    assert_metrics_recorded metric => {:call_count => 1}
   end
 
   def test_method_traced?
@@ -210,12 +217,13 @@ class NewRelic::Agent::MethodTracerTest < Minitest::Test
     self.class.add_method_tracer :method_c2, "c2", :metric => false
     self.class.add_method_tracer :method_c3, "c3", :push_scope => false
 
-    method_c1
+    in_transaction do
+      method_c1
+      assert_equal ['c2', 'c1'], @scope_listener.scopes
+    end
 
     assert_metrics_recorded(['c1', 'c3'])
     assert_metrics_not_recorded('c2')
-
-    assert_equal ['c2', 'c1'], @scope_listener.scopes
   end
 
   def test_nested_scope_tracer
@@ -226,13 +234,17 @@ class NewRelic::Agent::MethodTracerTest < Minitest::Test
     NewRelic::Agent.instance.stubs(:transaction_sampler).returns(@old_sampler)
 
     mock = Insider.new(@stats_engine)
-    mock.catcher(0)
-    mock.catcher(5)
 
-    stats = @stats_engine.get_stats("catcher")
-    assert_equal 2, stats.call_count
-    stats = @stats_engine.get_stats("thrower")
-    assert_equal 6, stats.call_count
+    in_transaction do
+      mock.catcher(0)
+      mock.catcher(5)
+    end
+
+    assert_metrics_recorded({
+      "catcher" => {:call_count => 2},
+      "thrower" => {:call_count => 6}
+    })
+
     sample = @old_sampler.harvest!
     refute_nil sample
   end
@@ -242,7 +254,12 @@ class NewRelic::Agent::MethodTracerTest < Minitest::Test
     self.class.add_method_tracer :method_to_be_traced, METRIC
     self.class.add_method_tracer :method_to_be_traced, METRIC
 
-    method_to_be_traced 1,2,3,true,METRIC
+    in_transaction do
+      method_to_be_traced 1,2,3,true,METRIC
+      assert_equal METRIC, @scope_listener.scopes.last
+      assert(METRIC != @scope_listener.scopes[-2],
+           'duplicate scope detected when redundant tracer is present')
+    end
 
     begin
       self.class.remove_method_tracer :method_to_be_traced, METRIC
@@ -250,12 +267,7 @@ class NewRelic::Agent::MethodTracerTest < Minitest::Test
       # ignore 'no tracer' errors from remove method tracer
     end
 
-    stats = @stats_engine.get_stats(METRIC)
-    check_time 0.05, stats.total_call_time
-    assert_equal 1, stats.call_count
-    assert_equal METRIC, @scope_listener.scopes.last
-    assert(METRIC != @scope_listener.scopes[-2],
-           'duplicate scope detected when redundant tracer is present')
+    assert_metrics_recorded METRIC => {:call_count => 1, :total_call_time => 0.05}
   end
 
   def test_add_tracer_with_dynamic_metric
@@ -264,7 +276,10 @@ class NewRelic::Agent::MethodTracerTest < Minitest::Test
     expected_metric = "1.2"
     self.class.add_method_tracer :method_to_be_traced, metric_code
 
-    method_to_be_traced 1,2,3,true,expected_metric
+    in_transaction do
+      method_to_be_traced 1,2,3,true,expected_metric
+      assert_equal expected_metric, @scope_listener.scopes.last
+    end
 
     begin
       self.class.remove_method_tracer :method_to_be_traced, metric_code
@@ -272,23 +287,20 @@ class NewRelic::Agent::MethodTracerTest < Minitest::Test
       # ignore 'no tracer' errors from remove method tracer
     end
 
-    stats = @stats_engine.get_stats(expected_metric)
-    check_time 0.05, stats.total_call_time
-    assert_equal 1, stats.call_count
-    assert_equal expected_metric, @scope_listener.scopes.last
+    assert_metrics_recorded expected_metric => {:call_count => 1, :total_call_time => 0.05}
   end
 
   def test_trace_method_with_block
     self.class.add_method_tracer :method_with_block, METRIC
+    in_transaction do
+      method_with_block(1,2,3,true,METRIC) do
+        advance_time 0.1
+      end
 
-    method_with_block(1,2,3,true,METRIC) do
-      advance_time 0.1
+      assert_equal METRIC, @scope_listener.scopes.last
     end
 
-    stats = @stats_engine.get_stats(METRIC)
-    check_time 0.15, stats.total_call_time
-    assert_equal 1, stats.call_count
-    assert_equal METRIC, @scope_listener.scopes.last
+    assert_metrics_recorded METRIC => {:call_count => 1, :total_call_time => 0.15}
   end
 
   def test_trace_module_method
@@ -303,8 +315,7 @@ class NewRelic::Agent::MethodTracerTest < Minitest::Test
 
     method_to_be_traced 1,2,3,false,METRIC
 
-    stats = @stats_engine.get_stats(METRIC)
-    assert stats.call_count == 0
+    assert_metrics_not_recorded METRIC
   end
 
   def self.static_method(x, testcase, is_traced)
@@ -323,15 +334,18 @@ class NewRelic::Agent::MethodTracerTest < Minitest::Test
 
   def test_multiple_metrics__scoped
     metrics = %w[first second third]
-    self.class.trace_execution_scoped metrics do
-      advance_time 0.05
+    in_transaction do
+      self.class.trace_execution_scoped metrics do
+        advance_time 0.05
+      end
     end
-    elapsed = @stats_engine.get_stats('first').total_call_time
-    metrics.map{|name| @stats_engine.get_stats name}.each do | m |
-      assert_equal 1, m.call_count
-      assert_equal elapsed, m.total_call_time
-    end
-    assert_equal 'first', @scope_listener.scopes.last
+
+
+    assert_metrics_recorded({
+      'first' => {:call_count => 1, :total_call_time => 0.05},
+      'second' => {:call_count => 1, :total_call_time => 0.05},
+      'third' => {:call_count => 1, :total_call_time => 0.05}
+    })
   end
 
   def test_multiple_metrics__unscoped
@@ -339,42 +353,45 @@ class NewRelic::Agent::MethodTracerTest < Minitest::Test
     self.class.trace_execution_unscoped metrics do
       advance_time 0.05
     end
-    elapsed = @stats_engine.get_stats('first').total_call_time
-    metrics.map{|name| @stats_engine.get_stats name}.each do | m |
-      assert_equal 1, m.call_count
-      assert_equal elapsed, m.total_call_time
-    end
+
+    assert_metrics_recorded({
+      'first' => {:call_count => 1, :total_call_time => 0.05},
+      'second' => {:call_count => 1, :total_call_time => 0.05},
+      'third' => {:call_count => 1, :total_call_time => 0.05}
+    })
     assert @scope_listener.scopes.empty?
   end
 
   def test_exception
     begin
       metric = "hey"
-      self.class.trace_execution_scoped(metric) do
-        raise StandardError.new
+      in_transaction do
+        self.class.trace_execution_scoped(metric) do
+          raise StandardError.new
+        end
+        # make sure the scope gets popped
+        assert_equal metric, @scope_listener.scopes.last
       end
 
       assert false # should never get here
     rescue StandardError
-      # make sure the scope gets popped
-      assert_equal metric, @scope_listener.scopes.last
     end
 
-    stats = @stats_engine.get_stats metric
-    assert_equal 1, stats.call_count
+    assert_metrics_recorded metric => {:call_count => 1}
   end
 
   def test_add_multiple_tracers
-    self.class.add_method_tracer :method_to_be_traced, 'XX', :push_scope => false
-    method_to_be_traced 1,2,3,true,nil
-    self.class.add_method_tracer :method_to_be_traced, 'YY'
-    method_to_be_traced 1,2,3,true,'YY'
-    self.class.remove_method_tracer :method_to_be_traced, 'YY'
-    method_to_be_traced 1,2,3,true,nil
-    self.class.remove_method_tracer :method_to_be_traced, 'XX'
-    method_to_be_traced 1,2,3,false,'XX'
-
-    assert_equal ['YY'], @scope_listener.scopes
+    in_transaction do
+      self.class.add_method_tracer :method_to_be_traced, 'XX', :push_scope => false
+      method_to_be_traced 1,2,3,true,nil
+      self.class.add_method_tracer :method_to_be_traced, 'YY'
+      method_to_be_traced 1,2,3,true,'YY'
+      self.class.remove_method_tracer :method_to_be_traced, 'YY'
+      method_to_be_traced 1,2,3,true,nil
+      self.class.remove_method_tracer :method_to_be_traced, 'XX'
+      method_to_be_traced 1,2,3,false,'XX'
+      assert_equal ['YY'], @scope_listener.scopes
+    end
   end
 
   def test_add_method_tracer_module_double_inclusion
@@ -403,29 +420,10 @@ class NewRelic::Agent::MethodTracerTest < Minitest::Test
 
     public_api_methods = [
       'trace_execution_unscoped',
-      'trace_execution_scoped',
-      'trace_method_execution',            # deprecated
-      'trace_method_execution_with_scope', # deprecated
-      'trace_method_execution_no_scope',   # deprecated
-      'get_stats_scoped',                  # deprecated
-      'get_stats_unscoped'                 # deprecated
+      'trace_execution_scoped'
     ]
 
     assert_equal(public_api_methods.sort, added_methods.map(&:to_s).sort)
-  end
-
-  def test_get_stats_unscoped
-    host_class = Class.new { include ::NewRelic::Agent::MethodTracer }
-    expected_stats = NewRelic::Agent.get_stats('foobar')
-    stats = host_class.new.get_stats_unscoped('foobar')
-    assert_same(expected_stats, stats)
-  end
-
-  def test_get_stats_scoped
-    host_class = Class.new { include ::NewRelic::Agent::MethodTracer }
-    expected_stats = NewRelic::Agent.get_stats('foobar', true)
-    stats = host_class.new.get_stats_scoped('foobar', false)
-    assert_same(expected_stats, stats)
   end
 
   def trace_no_push_scope

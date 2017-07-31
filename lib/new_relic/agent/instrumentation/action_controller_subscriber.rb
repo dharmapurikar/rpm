@@ -3,6 +3,7 @@
 # See https://github.com/newrelic/rpm/blob/master/LICENSE for complete details.
 require 'new_relic/agent/instrumentation/evented_subscriber'
 require 'new_relic/agent/instrumentation/ignore_actions'
+require 'new_relic/agent/parameter_filtering'
 
 module NewRelic
   module Agent
@@ -10,13 +11,12 @@ module NewRelic
       class ActionControllerSubscriber < EventedSubscriber
 
         def start(name, id, payload) #THREAD_LOCAL_ACCESS
-          state = TransactionState.tl_get
           request = state.request
           event = ControllerEvent.new(name, Time.now, nil, id, payload, request)
           push_event(event)
 
           if state.is_execution_traced? && !event.ignored?
-            start_transaction(state, event)
+            start_transaction(event)
           else
             # if this transaction is ignored, make sure child
             # transaction are also ignored
@@ -31,10 +31,8 @@ module NewRelic
           event = pop_event(id)
           event.payload.merge!(payload)
 
-          state = TransactionState.tl_get
-
           if state.is_execution_traced? && !event.ignored?
-            stop_transaction(state, event)
+            stop_transaction(event)
           else
             Agent.instance.pop_trace_execution_flag
           end
@@ -42,18 +40,17 @@ module NewRelic
           log_notification_error(e, name, 'finish')
         end
 
-        def start_transaction(state, event)
+        def start_transaction(event)
           Transaction.start(state, :controller,
                             :request          => event.request,
                             :filtered_params  => filter(event.payload[:params]),
                             :apdex_start_time => event.queue_start,
-                            :transaction_name => event.metric_name)
+                            :transaction_name => event.metric_name,
+                            :ignore_apdex     => event.apdex_ignored?,
+                            :ignore_enduser   => event.enduser_ignored?)
         end
 
-        def stop_transaction(state, event)
-          txn = state.current_transaction
-          txn.ignore_apdex!   if event.apdex_ignored?
-          txn.ignore_enduser! if event.enduser_ignored?
+        def stop_transaction(event)
           Transaction.stop(state)
         end
 

@@ -49,6 +49,10 @@ module NewRelic
         write_to_pipe(:error_data, errors) if errors
       end
 
+      def error_event_data(events)
+        write_to_pipe(:error_event_data, events) if events
+      end
+
       def sql_trace_data(sql)
         write_to_pipe(:sql_trace_data, sql) if sql
       end
@@ -64,16 +68,10 @@ module NewRelic
         yield
       end
 
-      def reset_metric_id_cache
-        # we don't cache metric IDs, so nothing to do
-      end
-
       private
 
       def marshal_payload(data)
-        NewRelic::LanguageSupport.with_cautious_gc do
-          Marshal.dump(data)
-        end
+        Marshal.dump(data)
       end
 
       def write_to_pipe(endpoint, data)
